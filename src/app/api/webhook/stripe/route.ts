@@ -105,68 +105,59 @@ async function setUserPlan(
   console.log(`[webhook][${context}]   sub      = ${subscriptionId}`);
   console.log(`[webhook][${context}]   priceId  = ${priceId}`);
 
-  // ── STEP 1: UPDATE plan (simplest possible write — only touches the plan column) ──
-  console.log(`[webhook][${context}]   STEP 1: UPDATE profiles SET plan='${plan}' WHERE id='${userId}'`);
+  // ── STEP 1: UPDATE plan + analysis_count in one atomic query ────────────────
+  //   Uses service-role client → bypasses RLS → always has permission to write.
+  //   Requires the migration to have been run so analysis_count column exists.
+  console.log(`[webhook][${context}]   STEP 1: UPDATE profiles SET plan='${plan}', analysis_count=0 WHERE id='${userId}'`);
 
   const { error: updateErr, count: updatedRows } = await supa
     .from("profiles")
-    .update({ plan })
+    .update({ plan, analysis_count: 0 })
     .eq("id", userId)
     .select("id", { count: "exact", head: true });
 
   if (updateErr) {
     console.error(`[webhook][${context}]   ❌ UPDATE failed: ${updateErr.message} (code=${updateErr.code})`);
     console.error(`[webhook][${context}]   details: ${updateErr.details}`);
-    console.error(`[webhook][${context}]   hint: ${updateErr.hint}`);
-    throw new Error(`UPDATE profiles SET plan failed for user=${userId}: ${updateErr.message}`);
+    console.error(`[webhook][${context}]   hint:    ${updateErr.hint}`);
+    console.error(`[webhook][${context}]   ⚠ Did you run supabase/migrations/20260406000000_ensure_analysis_count.sql?`);
+    throw new Error(`UPDATE profiles failed for user=${userId}: ${updateErr.message}`);
   }
 
   const rowsAffected = updatedRows ?? 0;
   console.log(`[webhook][${context}]   UPDATE rowsAffected=${rowsAffected}`);
 
-  // ── STEP 2: If 0 rows updated → no profile row exists → INSERT one ───────────
+  // ── STEP 2: If 0 rows updated → no profile row exists yet → INSERT one ───────
   if (rowsAffected === 0) {
-    console.log(`[webhook][${context}]   STEP 2: No row found — inserting new profile row`);
+    console.log(`[webhook][${context}]   STEP 2: profile row not found — inserting new row`);
     const { error: insertErr } = await supa
       .from("profiles")
-      .insert({ id: userId, plan });
+      .insert({ id: userId, plan, analysis_count: 0 });
 
     if (insertErr) {
       console.error(`[webhook][${context}]   ❌ INSERT failed: ${insertErr.message} (code=${insertErr.code})`);
       throw new Error(`INSERT profiles failed for user=${userId}: ${insertErr.message}`);
     }
-    console.log(`[webhook][${context}]   INSERT success — new profile row created with plan=${plan}`);
+    console.log(`[webhook][${context}]   INSERT success — new profile row created`);
+  } else {
+    console.log(`[webhook][${context}]   STEP 2: skipped (row already updated in step 1)`);
   }
 
   // ── STEP 3: Update Stripe IDs (best-effort, separate query) ──────────────────
   if (customerId || subscriptionId || priceId) {
-    console.log(`[webhook][${context}]   STEP 3: updating Stripe IDs`);
-    const stripeUpdate: Record<string, string | null> = {};
-    if (customerId)    stripeUpdate.stripe_customer_id     = customerId;
-    if (subscriptionId) stripeUpdate.stripe_subscription_id = subscriptionId;
-    if (priceId)       stripeUpdate.stripe_price_id        = priceId;
+    console.log(`[webhook][${context}]   STEP 3: writing Stripe IDs`);
+    const stripeFields: Record<string, string | null> = {};
+    if (customerId)     stripeFields.stripe_customer_id     = customerId;
+    if (subscriptionId) stripeFields.stripe_subscription_id = subscriptionId;
+    if (priceId)        stripeFields.stripe_price_id        = priceId;
 
     const { error: stripeErr } = await supa
       .from("profiles")
-      .update(stripeUpdate)
+      .update(stripeFields)
       .eq("id", userId);
 
-    if (stripeErr) console.warn(`[webhook][${context}]   Stripe IDs update skipped: ${stripeErr.message}`);
-    else console.log(`[webhook][${context}]   Stripe IDs updated`);
-  }
-
-  // ── STEP 4: Reset analysis_count to 0 (best-effort — column may not exist) ───
-  console.log(`[webhook][${context}]   STEP 4: resetting analysis_count to 0`);
-  const { error: countErr } = await supa
-    .from("profiles")
-    .update({ analysis_count: 0 })
-    .eq("id", userId);
-
-  if (countErr) {
-    // Column may not exist — not a fatal error
-    console.warn(`[webhook][${context}]   analysis_count reset skipped: ${countErr.message}`);
-  } else {
-    console.log(`[webhook][${context}]   analysis_count reset to 0`);
+    if (stripeErr) console.warn(`[webhook][${context}]   Stripe IDs write failed: ${stripeErr.message}`);
+    else console.log(`[webhook][${context}]   Stripe IDs written`);
   }
 
   // ── STEP 5: Read back and verify ─────────────────────────────────────────────
