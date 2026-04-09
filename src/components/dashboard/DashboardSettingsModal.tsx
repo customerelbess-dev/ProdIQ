@@ -23,6 +23,59 @@ export type SettingsTabKey =
   | "help"
   | "contact";
 
+// Plan metadata for the billing tab
+const BILLING_PLANS = [
+  {
+    key: "starter",
+    name: "Starter",
+    price: "$29.90",
+    quota: "15 analyses / day",
+    color: "#888888",
+    popular: false,
+  },
+  {
+    key: "pro",
+    name: "Pro",
+    price: "$59.90",
+    quota: "30 analyses / day",
+    color: "#6c47ff",
+    popular: true,
+  },
+  {
+    key: "agency",
+    name: "Agency",
+    price: "$89.90",
+    quota: "Unlimited",
+    color: "#f59e0b",
+    popular: false,
+  },
+] as const;
+
+function planDisplayName(plan: string): string {
+  const map: Record<string, string> = {
+    free: "Free", starter: "Starter", pro: "Pro", agency: "Agency", enterprise: "Agency",
+  };
+  return map[plan] ?? (plan.charAt(0).toUpperCase() + plan.slice(1));
+}
+
+function planQuota(plan: string): string {
+  const map: Record<string, string> = {
+    free: "1 total analysis",
+    starter: "15 analyses / day",
+    pro: "30 analyses / day",
+    agency: "Unlimited analyses",
+    enterprise: "Unlimited analyses",
+  };
+  return map[plan] ?? "—";
+}
+
+function planColor(plan: string): string {
+  const map: Record<string, string> = {
+    free: "#555", starter: "#888", pro: "#6c47ff", agency: "#f59e0b", enterprise: "#f59e0b",
+  };
+  return map[plan] ?? "#6c47ff";
+}
+
 type Props = {
   open: boolean;
   onClose: () => void;
@@ -30,7 +83,11 @@ type Props = {
   setSettingsTab: (k: SettingsTabKey) => void;
   user: User | null;
   analyses: SettingsAnalysisRow[];
+  userPlan?: string;
+  analysesUsed?: number;
   onLogout?: () => void;
+  onSubscribe?: (planKey: string) => void;
+  subscribingPlan?: string | null;
 };
 
 const SIDEBAR: { key: SettingsTabKey; icon: string; label: string }[] = [
@@ -59,13 +116,29 @@ export function DashboardSettingsModal({
   setSettingsTab,
   user,
   analyses,
+  userPlan = "free",
+  analysesUsed,
   onLogout,
+  onSubscribe,
+  subscribingPlan,
 }: Props) {
   if (!open) return null;
 
   const email = user?.email ?? "";
   const fullName =
     (user?.user_metadata as { full_name?: string } | undefined)?.full_name ?? "";
+
+  // Compute how many analyses are "used" and remaining
+  const totalAnalyses = analysesUsed ?? analyses.length;
+  const isPaidPlan = ["starter", "pro", "agency", "enterprise"].includes(userPlan);
+  const quotaLabel = planQuota(userPlan);
+  const dailyLimit = userPlan === "starter" ? 15 : userPlan === "pro" ? 30 : null;
+  const remainingLabel =
+    userPlan === "free"
+      ? `${Math.max(0, 1 - totalAnalyses)} of 1 remaining`
+      : dailyLimit !== null
+      ? `${dailyLimit} per day`
+      : "Unlimited";
 
   return (
     <div
@@ -244,8 +317,8 @@ export function DashboardSettingsModal({
                     <div style={{ color: "#555", fontSize: 13 }}>{email || "—"}</div>
                     <div
                       style={{
-                        background: "rgba(108,71,255,0.15)",
-                        color: "#a78bfa",
+                        background: isPaidPlan ? `${planColor(userPlan)}22` : "rgba(108,71,255,0.15)",
+                        color: isPaidPlan ? planColor(userPlan) : "#a78bfa",
                         fontSize: 10,
                         fontWeight: 700,
                         padding: "2px 8px",
@@ -254,7 +327,7 @@ export function DashboardSettingsModal({
                         marginTop: 4,
                       }}
                     >
-                      FREE PLAN
+                      {planDisplayName(userPlan).toUpperCase()} PLAN
                     </div>
                   </div>
                 </div>
@@ -336,91 +409,136 @@ export function DashboardSettingsModal({
             {settingsTab === "billing" && (
               <div>
                 <div style={{ color: "white", fontWeight: 700, fontSize: 16, marginBottom: 20 }}>Billing & Plan</div>
+
+                {/* Current plan card */}
                 <div
                   style={{
-                    background: "rgba(108,71,255,0.08)",
-                    border: "1px solid rgba(108,71,255,0.2)",
+                    background: isPaidPlan ? `${planColor(userPlan)}0d` : "rgba(108,71,255,0.08)",
+                    border: `1px solid ${isPaidPlan ? `${planColor(userPlan)}33` : "rgba(108,71,255,0.2)"}`,
                     borderRadius: 14,
                     padding: 20,
-                    marginBottom: 20,
+                    marginBottom: 24,
                   }}
                 >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
                     <div>
-                      <div style={{ color: "#a78bfa", fontSize: 11, fontWeight: 700, marginBottom: 4 }}>CURRENT PLAN</div>
-                      <div style={{ color: "white", fontWeight: 800, fontSize: 22 }}>Free</div>
-                      <div style={{ color: "#555", fontSize: 13 }}>1 analysis remaining</div>
+                      <div style={{ color: isPaidPlan ? planColor(userPlan) : "#a78bfa", fontSize: 11, fontWeight: 700, marginBottom: 4 }}>
+                        CURRENT PLAN
+                      </div>
+                      <div style={{ color: "white", fontWeight: 900, fontSize: 26, marginBottom: 4 }}>
+                        {planDisplayName(userPlan)}
+                      </div>
+                      <div style={{ color: "#666", fontSize: 13 }}>{quotaLabel}</div>
                     </div>
-                    <button
-                      type="button"
-                      style={{
-                        background: "#6c47ff",
-                        border: "none",
-                        borderRadius: 10,
-                        padding: "12px 24px",
-                        color: "white",
-                        fontSize: 14,
-                        fontWeight: 600,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Upgrade Plan →
-                    </button>
+                    <div style={{ textAlign: "right" }}>
+                      {/* Usage meter */}
+                      <div style={{ color: "#555", fontSize: 11, fontWeight: 600, marginBottom: 6 }}>USAGE</div>
+                      <div style={{ color: "white", fontWeight: 800, fontSize: 20 }}>
+                        {userPlan === "free" ? `${totalAnalyses} / 1` : totalAnalyses}
+                      </div>
+                      <div style={{ color: "#555", fontSize: 11, marginTop: 2 }}>
+                        {remainingLabel}
+                      </div>
+                    </div>
                   </div>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }} className="max-sm:grid-cols-1">
-                  {[
-                    { name: "Starter", price: "$29.90", analyses: "15/day", color: "#555", popular: false },
-                    { name: "Pro", price: "$59.90", analyses: "30/day", color: "#6c47ff", popular: true },
-                    { name: "Agency", price: "$89.90", analyses: "50+/day", color: "#f59e0b", popular: false },
-                  ].map((plan, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        background: plan.popular ? "rgba(108,71,255,0.08)" : "#111",
-                        border: `1px solid ${plan.popular ? "rgba(108,71,255,0.4)" : "#1a1a1a"}`,
-                        borderRadius: 14,
-                        padding: 20,
-                        textAlign: "center",
-                      }}
-                    >
-                      {plan.popular ? (
+                  {/* Usage bar for free plan */}
+                  {userPlan === "free" && (
+                    <div style={{ marginTop: 14 }}>
+                      <div style={{ background: "#1a1a1a", borderRadius: 8, height: 6, overflow: "hidden" }}>
                         <div
                           style={{
-                            background: "#6c47ff",
-                            color: "white",
-                            fontSize: 9,
-                            fontWeight: 800,
-                            padding: "3px 10px",
-                            borderRadius: 10,
-                            display: "inline-block",
-                            marginBottom: 8,
+                            width: `${Math.min(100, totalAnalyses * 100)}%`,
+                            height: "100%",
+                            background: totalAnalyses >= 1 ? "#ff4444" : "#6c47ff",
+                            borderRadius: 8,
+                            transition: "width 0.5s ease",
                           }}
-                        >
-                          PRO
-                        </div>
-                      ) : null}
-                      <div style={{ color: "white", fontWeight: 700, fontSize: 15, marginBottom: 4 }}>{plan.name}</div>
-                      <div style={{ color: plan.color, fontWeight: 900, fontSize: 24, marginBottom: 4 }}>{plan.price}</div>
-                      <div style={{ color: "#555", fontSize: 11, marginBottom: 14 }}>{plan.analyses}</div>
-                      <button
-                        type="button"
-                        style={{
-                          background: plan.popular ? "#6c47ff" : "transparent",
-                          border: `1px solid ${plan.popular ? "#6c47ff" : "#333"}`,
-                          borderRadius: 8,
-                          padding: "8px 16px",
-                          color: plan.popular ? "white" : "#666",
-                          fontSize: 12,
-                          cursor: "pointer",
-                          width: "100%",
-                        }}
-                      >
-                        Choose {plan.name}
-                      </button>
+                        />
+                      </div>
                     </div>
-                  ))}
+                  )}
                 </div>
+
+                {/* Upgrade plans */}
+                {!isPaidPlan || userPlan === "starter" ? (
+                  <div>
+                    <div style={{ color: "#555", fontSize: 12, fontWeight: 600, letterSpacing: "0.5px", marginBottom: 12 }}>
+                      {isPaidPlan ? "UPGRADE YOUR PLAN" : "CHOOSE A PLAN"}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }} className="max-sm:grid-cols-1">
+                      {BILLING_PLANS.filter((p) => {
+                        if (userPlan === "starter") return p.key !== "starter";
+                        return true; // show all for free
+                      }).map((plan) => {
+                        const isCurrentPlan = userPlan === plan.key;
+                        const isLoading = subscribingPlan === plan.key;
+                        return (
+                          <div
+                            key={plan.key}
+                            style={{
+                              background: plan.popular ? "rgba(108,71,255,0.08)" : "#111",
+                              border: `1px solid ${plan.popular ? "rgba(108,71,255,0.4)" : "#1a1a1a"}`,
+                              borderRadius: 14,
+                              padding: 20,
+                              textAlign: "center",
+                              position: "relative",
+                            }}
+                          >
+                            {plan.popular && (
+                              <div style={{ position: "absolute", top: -11, left: "50%", transform: "translateX(-50%)", background: "#6c47ff", color: "white", fontSize: 9, fontWeight: 800, padding: "3px 10px", borderRadius: 10, whiteSpace: "nowrap" }}>
+                                PRO
+                              </div>
+                            )}
+                            <div style={{ color: "white", fontWeight: 700, fontSize: 15, marginBottom: 4 }}>{plan.name}</div>
+                            <div style={{ color: plan.color, fontWeight: 900, fontSize: 22, marginBottom: 2 }}>{plan.price}</div>
+                            <div style={{ color: "#555", fontSize: 11, marginBottom: 14 }}>{plan.quota}</div>
+                            {isCurrentPlan ? (
+                              <div style={{ background: "rgba(0,212,170,0.1)", border: "1px solid rgba(0,212,170,0.3)", borderRadius: 8, padding: "8px 16px", color: "#00d4aa", fontSize: 12, fontWeight: 700 }}>
+                                ✓ Current Plan
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={isLoading || subscribingPlan !== null}
+                                onClick={() => onSubscribe?.(plan.key)}
+                                style={{
+                                  background: plan.popular ? "#6c47ff" : "transparent",
+                                  border: `1px solid ${plan.popular ? "#6c47ff" : "#333"}`,
+                                  borderRadius: 8,
+                                  padding: "8px 16px",
+                                  color: plan.popular ? "white" : "#666",
+                                  fontSize: 12,
+                                  cursor: isLoading ? "wait" : "pointer",
+                                  width: "100%",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  gap: 6,
+                                  opacity: subscribingPlan !== null && !isLoading ? 0.6 : 1,
+                                }}
+                              >
+                                {isLoading ? (
+                                  <>
+                                    <span style={{ width: 12, height: 12, borderRadius: "50%", border: "2px solid", borderTopColor: "transparent", display: "inline-block", animation: "spin 0.8s linear infinite" }} />
+                                    Loading…
+                                  </>
+                                ) : (
+                                  `Upgrade to ${plan.name} →`
+                                )}
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ background: "rgba(0,212,170,0.06)", border: "1px solid rgba(0,212,170,0.2)", borderRadius: 14, padding: 20, textAlign: "center" }}>
+                    <div style={{ fontSize: 32, marginBottom: 10 }}>🎉</div>
+                    <div style={{ color: "#00d4aa", fontWeight: 700, fontSize: 15, marginBottom: 6 }}>You&apos;re on the {planDisplayName(userPlan)} plan</div>
+                    <div style={{ color: "#555", fontSize: 13 }}>Enjoy {quotaLabel}. Contact support to manage your subscription.</div>
+                  </div>
+                )}
               </div>
             )}
 

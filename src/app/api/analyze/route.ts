@@ -2,15 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@supabase/supabase-js";
 import { runFullAnalysis, type AnalyzeInput } from "@/lib/analyze-pipeline";
-
-const FREE_ANALYSIS_LIMIT = 1;
-const PAID_PLANS = ["starter", "pro", "agency", "enterprise"] as const;
+import { PLAN_LIMITS, nextPlanUp } from "@/lib/stripe";
 
 interface UsageInfo {
   /** Non-null means the request should be blocked with this response */
   blockResponse: NextResponse | null;
-  /** True when this is a free user whose count should be incremented after success */
-  isFreeUser: boolean;
+  /** True when this user's usage should be incremented after success */
+  shouldRecord: boolean;
   /**
    * Call AFTER a successful analysis to record usage.
    * Closes over the Supabase client — no args needed.
@@ -22,15 +20,17 @@ interface UsageInfo {
  * Server-side usage check.
  *
  * Source of truth: count rows in the `analyses` table for this user.
- * This requires NO migrations and cannot drift from reality.
  *
- * - Paid users:              allowed (no limit).
- * - Free user, 0 analyses:   allowed (first free analysis).
- * - Free user, ≥1 analysis:  blocked with HTTP 402.
- * - No token / DB error:     allowed (fail open — never block on infra error).
+ * Plan limits (from PLAN_LIMITS in @/lib/stripe):
+ *   free     → 1 total all-time
+ *   starter  → 15 per day
+ *   pro      → 30 per day
+ *   agency   → unlimited
+ *
+ * Fails open (allows the request) on any infrastructure error.
  */
 async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
-  const noop: UsageInfo = { blockResponse: null, isFreeUser: false, recordUsage: async () => {} };
+  const noop: UsageInfo = { blockResponse: null, shouldRecord: false, recordUsage: async () => {} };
 
   const token = req.headers.get("Authorization")?.replace("Bearer ", "").trim();
   if (!token) return noop;
@@ -58,49 +58,67 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
       .maybeSingle();
 
     const plan = String(profile?.plan ?? "free");
-    if ((PAID_PLANS as readonly string[]).includes(plan)) return noop; // paid → no limit
+    const planConfig = PLAN_LIMITS[plan] ?? PLAN_LIMITS["free"];
 
-    // ── 2. Count real analyses rows — this is the ground truth ─────────────
-    const { count, error: countErr } = await client
+    // Unlimited plan — allow immediately
+    if (planConfig.limit === null) return noop;
+
+    // ── 2. Count analyses for the relevant period ───────────────────────────
+    let query = client
       .from("analyses")
       .select("id", { count: "exact", head: true })
       .eq("user_id", userId);
 
+    if (planConfig.period === "daily") {
+      // Count only today's analyses
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      query = query.gte("created_at", todayStart.toISOString());
+    }
+
+    const { count, error: countErr } = await query;
     if (countErr) {
       console.error("[analyze] count error — failing open:", countErr.message);
-      return noop; // Fail open on DB error
+      return noop;
     }
 
     const analysesCount = count ?? 0;
-    console.log(`[analyze] user=${userId} plan=${plan} analyses=${analysesCount} limit=${FREE_ANALYSIS_LIMIT}`);
+    const limit = planConfig.limit;
+    console.log(`[analyze] user=${userId} plan=${plan} period=${planConfig.period} used=${analysesCount}/${limit}`);
 
-    // ── 3. Block if over limit ──────────────────────────────────────────────
-    if (analysesCount >= FREE_ANALYSIS_LIMIT) {
+    // ── 3. Block if at or over limit ────────────────────────────────────────
+    if (analysesCount >= limit) {
+      const suggested = nextPlanUp(plan);
       return {
         blockResponse: NextResponse.json(
           {
             error: "LIMIT_REACHED",
-            message: `You've used your ${FREE_ANALYSIS_LIMIT} free analysis. Upgrade to continue.`,
+            message:
+              plan === "free"
+                ? `You've used your 1 free analysis. Upgrade to continue.`
+                : `You've reached your ${planConfig.label}. Upgrade to ${suggested ?? "a higher plan"} for more.`,
+            plan,
             analyses_used: analysesCount,
-            limit: FREE_ANALYSIS_LIMIT,
+            limit,
+            next_plan: suggested,
           },
           { status: 402 },
         ),
-        isFreeUser: true,
+        shouldRecord: false,
         recordUsage: async () => {},
       };
     }
 
-    // ── 4. Within limit — recordUsage closes over client ───────────────────
+    // ── 4. Within limit — record after success ─────────────────────────────
     const recordUsage = async () => {
       try {
         await client.rpc("increment_analysis_count", { uid: userId });
       } catch {
-        // Silent — the analyses table row count is the real source of truth anyway
+        // Silent — the analyses table row count is the real source of truth
       }
     };
 
-    return { blockResponse: null, isFreeUser: true, recordUsage };
+    return { blockResponse: null, shouldRecord: true, recordUsage };
   } catch (err) {
     console.error("[analyze] usage check exception — failing open:", err);
     return noop;
@@ -588,11 +606,8 @@ export async function POST(req: NextRequest) {
 
     if (product_name && search_query) {
       const report = await runDashboardAnalysis(product_name, search_query, asin || undefined);
-      // Record usage for free users AFTER a successful analysis
-      if (usage.isFreeUser) await usage.recordUsage();
-      // Signal the frontend that this was the last free analysis
-      const freeLimitReached = usage.isFreeUser;
-      return NextResponse.json({ success: true, report, free_limit_reached: freeLimitReached });
+      if (usage.shouldRecord) await usage.recordUsage();
+      return NextResponse.json({ success: true, report, free_limit_reached: usage.shouldRecord });
     }
 
     if (!body.inputType || !["image", "url", "text"].includes(String(body.inputType))) {
@@ -631,8 +646,8 @@ export async function POST(req: NextRequest) {
     };
 
     const report = await runFullAnalysis(input);
-    if (usage.isFreeUser) await usage.recordUsage();
-    return NextResponse.json({ ...report, free_limit_reached: usage.isFreeUser });
+    if (usage.shouldRecord) await usage.recordUsage();
+    return NextResponse.json({ ...report, free_limit_reached: usage.shouldRecord });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Analysis failed";
     console.error("Analysis error:", error);

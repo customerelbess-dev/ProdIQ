@@ -730,30 +730,47 @@ export default function DashboardPage() {
    * Shows the upgrade wall and returns true, or returns false if they can proceed.
    */
   const checkAndBlockIfOverLimit = async (): Promise<boolean> => {
-    const PAID = ["starter", "pro", "agency", "enterprise"];
-    // Fast path: already know they're paid
-    if (PAID.includes(userPlan)) return false;
-
-    // Re-query Supabase for the authoritative count
+    // Re-query Supabase for the authoritative plan + count
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session?.user?.id) return false; // can't check → let server handle it
 
-      const [profileRes, countRes] = await Promise.all([
-        supabase.from("profiles").select("plan").eq("id", session.user.id).maybeSingle(),
-        supabase.from("analyses").select("id", { count: "exact", head: true }).eq("user_id", session.user.id),
-      ]);
+      const userId = session.user.id;
 
-      const livePlan = String(profileRes.data?.plan ?? "free");
-      if (PAID.includes(livePlan)) {
-        setUserPlan(livePlan as "free" | "starter" | "pro" | "agency" | "enterprise");
-        return false;
+      // Fetch plan
+      const { data: profileData } = await supabase
+        .from("profiles").select("plan").eq("id", userId).maybeSingle();
+      const livePlan = String(profileData?.plan ?? "free");
+
+      // Sync plan to state
+      setUserPlan(livePlan as "free" | "starter" | "pro" | "agency" | "enterprise");
+
+      // Agency/enterprise = unlimited
+      if (["agency", "enterprise"].includes(livePlan)) return false;
+
+      // Determine limit and query period for this plan
+      const isFreePlan = livePlan === "free";
+      const dailyLimit = livePlan === "starter" ? 15 : livePlan === "pro" ? 30 : 1;
+
+      let countQuery = supabase
+        .from("analyses")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId);
+
+      if (!isFreePlan) {
+        // For paid plans: count today's analyses only
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        countQuery = countQuery.gte("created_at", todayStart.toISOString());
       }
 
-      const liveCount = countRes.count ?? 0;
-      console.log(`[limit] live check: plan=${livePlan} analyses=${liveCount}`);
+      const { count: liveCount } = await countQuery;
+      const used = liveCount ?? 0;
+      const limit = isFreePlan ? 1 : dailyLimit;
 
-      if (liveCount >= 1) {
+      console.log(`[limit] live check: plan=${livePlan} used=${used}/${limit}`);
+
+      if (used >= limit) {
         setShowUpgradeWall(true);
         return true;
       }
@@ -2497,7 +2514,8 @@ export default function DashboardPage() {
   // Shown immediately after a free user finishes their 1 free analysis.
   // Cannot be dismissed — only pick a plan or sign out.
   if (showUpgradeWall) {
-    const UPGRADE_PLANS = [
+    // All plans with their details
+    const ALL_PLANS = [
       {
         key: "starter",
         label: "Starter",
@@ -2543,6 +2561,23 @@ export default function DashboardPage() {
       },
     ] as const;
 
+    // Only show plans higher than current plan
+    const planOrder = ["free", "starter", "pro", "agency"];
+    const currentIdx = planOrder.indexOf(userPlan);
+    const UPGRADE_PLANS = ALL_PLANS.filter((p) => planOrder.indexOf(p.key) > currentIdx);
+
+    // Dynamic header copy
+    const isPaidLimit = userPlan !== "free";
+    const limitBadgeText = isPaidLimit
+      ? `${userPlan.toUpperCase()} DAILY LIMIT REACHED`
+      : "FREE ANALYSIS USED";
+    const limitHeading = isPaidLimit
+      ? `You've reached your ${userPlan === "starter" ? "15" : "30"} daily analyses`
+      : "You've used your free analysis";
+    const limitSubtext = isPaidLimit
+      ? `Upgrade to get more daily analyses and unlock advanced features.`
+      : "Pick a plan below to keep validating products, discovering winning angles, and launching with confidence.";
+
     return (
       <div
         style={{
@@ -2570,13 +2605,13 @@ export default function DashboardPage() {
           <div style={{ textAlign: "center", marginBottom: 52 }}>
             <div style={{ fontSize: 56, marginBottom: 20, display: "inline-block", animation: "uw-float 3.5s ease-in-out infinite" }}>🔒</div>
             <div style={{ background: "rgba(255,68,68,0.12)", border: "1px solid rgba(255,68,68,0.3)", borderRadius: 20, padding: "5px 18px", display: "inline-block", color: "#ff6b6b", fontSize: 11, fontWeight: 800, letterSpacing: "1.5px", marginBottom: 24 }}>
-              FREE ANALYSIS USED
+              {limitBadgeText}
             </div>
             <h2 style={{ color: "white", fontSize: "clamp(24px,5vw,38px)", fontWeight: 900, marginBottom: 14, lineHeight: 1.2 }}>
-              You&apos;ve used your free analysis
+              {limitHeading}
             </h2>
             <p style={{ color: "#666", fontSize: 16, lineHeight: 1.8, maxWidth: 500, margin: "0 auto" }}>
-              Pick a plan below to keep validating products, discovering winning angles, and launching with confidence.
+              {limitSubtext}
             </p>
           </div>
 
@@ -2818,7 +2853,11 @@ export default function DashboardPage() {
         setSettingsTab={setSettingsTab}
         user={user}
         analyses={analyses}
+        userPlan={userPlan}
+        analysesUsed={analyses.length}
         onLogout={() => void handleLogout()}
+        onSubscribe={(planKey) => void subscribeToPlan(planKey)}
+        subscribingPlan={subscribingPlan}
       />
 
       <main className="mx-auto max-w-[1200px] px-4 pb-24 pt-8 sm:px-6">{renderTabBody()}</main>
