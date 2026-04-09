@@ -225,8 +225,9 @@ export default function DashboardPage() {
   const [user, setUser] = useState<User | null>(null);
 
   // Usage limiting
-  const [userPlan, setUserPlan] = useState<"free" | "starter" | "pro" | "agency">("free");
+  const [userPlan, setUserPlan] = useState<"free" | "starter" | "pro" | "agency" | "enterprise">("free");
   const [showUpgradeWall, setShowUpgradeWall] = useState(false);
+  const [subscribingPlan, setSubscribingPlan] = useState<string | null>(null);
 
   const [showSettings, setShowSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTabKey>("account");
@@ -968,6 +969,34 @@ export default function DashboardPage() {
     router.replace("/login");
   };
 
+  const subscribeToPlan = async (planKey: string) => {
+    const priceIds: Record<string, string> = {
+      starter:    process.env.NEXT_PUBLIC_STRIPE_PRICE_STARTER    ?? "",
+      pro:        process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO        ?? "",
+      enterprise: process.env.NEXT_PUBLIC_STRIPE_PRICE_ENTERPRISE ?? "",
+    };
+    const priceId = priceIds[planKey];
+    if (!priceId) { router.push("/pricing"); return; }
+    setSubscribingPlan(planKey);
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token ?? "";
+      const res = await fetch("/api/stripe/checkout", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ priceId }),
+      });
+      const json = (await res.json()) as { url?: string };
+      if (json.url) { window.location.href = json.url; } else { router.push("/pricing"); }
+    } catch {
+      setSubscribingPlan(null);
+      router.push("/pricing");
+    }
+  };
+
   async function handleConfirmProduct() {
     if (!identifiedProduct) return;
     setErrorMsg(null);
@@ -1011,7 +1040,7 @@ export default function DashboardPage() {
         clearResearchTickers();
         setBusy(false);
         setCurrentStep(1);
-        setShowUpgradeWall(true);
+        router.push("/pricing");
         return;
       }
 
@@ -1038,7 +1067,7 @@ export default function DashboardPage() {
         ANALYSIS_STORE.inFlight = false;
         setBusy(false);
         setCurrentStep(1);
-        setShowUpgradeWall(true);
+        router.push("/pricing");
         return;
       }
 
@@ -1169,6 +1198,11 @@ export default function DashboardPage() {
       if (fileRef.current) fileRef.current.value = "";
       setIdentifiedProduct(null);
       resetAnalysisStore();
+
+      // Show upgrade wall immediately after their one free analysis finishes
+      if (anJson.free_limit_reached === true) {
+        setTimeout(() => setShowUpgradeWall(true), 700);
+      }
     } catch (e: unknown) {
       clearResearchTickers();
       ANALYSIS_STORE.inFlight = false;
@@ -2412,109 +2446,177 @@ export default function DashboardPage() {
   }
 
   // ── Upgrade wall ────────────────────────────────────────────────────────────
-  // Shown when a free user has used their 1 free analysis.
-  // Cannot be dismissed — only upgrade or sign out.
+  // Shown immediately after a free user finishes their 1 free analysis.
+  // Cannot be dismissed — only pick a plan or sign out.
   if (showUpgradeWall) {
+    const UPGRADE_PLANS = [
+      {
+        key: "starter",
+        label: "Starter",
+        price: "$29.90",
+        tagline: "Perfect for solo sellers",
+        color: "#888888",
+        features: [
+          "15 analyses / day",
+          "Market research & demand score",
+          "Go or No-Go verdict",
+          "Top 3 competitors",
+          "Basic angle suggestions",
+        ],
+      },
+      {
+        key: "pro",
+        label: "Pro",
+        price: "$59.90",
+        tagline: "For serious sellers",
+        color: "#6c47ff",
+        popular: true,
+        features: [
+          "30 analyses / day",
+          "Everything in Starter",
+          "Full angle discovery",
+          "Ad scripts & competitor ad library",
+          "Private supplier network",
+        ],
+      },
+      {
+        key: "enterprise",
+        label: "Enterprise",
+        price: "$89.90",
+        tagline: "Agencies & power sellers",
+        color: "#f59e0b",
+        features: [
+          "Unlimited analyses",
+          "Everything in Pro",
+          "White label reports",
+          "API access & team seats",
+          "Dedicated account manager",
+        ],
+      },
+    ] as const;
+
     return (
       <div
         style={{
           position: "fixed",
           inset: 0,
           zIndex: 9999,
-          background: "rgba(4,4,6,0.97)",
-          backdropFilter: "blur(24px)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: "24px",
+          background: "rgba(4,4,6,0.98)",
+          backdropFilter: "blur(28px)",
+          overflowY: "auto",
           fontFamily: "system-ui, sans-serif",
         }}
       >
         <style>{`
-          @keyframes uw-glow { 0%,100%{opacity:.4} 50%{opacity:.9} }
-          @keyframes uw-pulse { 0%,80%,100%{transform:scale(.8);opacity:.2} 40%{transform:scale(1);opacity:1} }
+          @keyframes uw-glow  { 0%,100%{opacity:.35} 50%{opacity:.8} }
+          @keyframes uw-float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-10px)} }
+          @keyframes uw-spin  { to{transform:rotate(360deg)} }
         `}</style>
 
-        {/* Ambient glow */}
-        <div style={{ position: "absolute", top: "20%", left: "50%", transform: "translateX(-50%)", width: 600, height: 300, background: "radial-gradient(ellipse, rgba(108,71,255,0.18) 0%, transparent 70%)", pointerEvents: "none", animation: "uw-glow 4s ease-in-out infinite" }} />
+        {/* Background glow */}
+        <div style={{ position: "fixed", top: "0%", left: "50%", transform: "translateX(-50%)", width: 800, height: 400, background: "radial-gradient(ellipse, rgba(108,71,255,0.14) 0%, transparent 70%)", pointerEvents: "none", animation: "uw-glow 5s ease-in-out infinite" }} />
 
-        <div
-          style={{
-            position: "relative",
-            background: "#0c0c14",
-            border: "1px solid rgba(108,71,255,0.45)",
-            borderRadius: 28,
-            padding: "52px 44px 44px",
-            maxWidth: 500,
-            width: "100%",
-            textAlign: "center",
-            boxShadow: "0 0 80px rgba(108,71,255,0.25), 0 40px 80px rgba(0,0,0,0.8)",
-          }}
-        >
-          {/* Lock icon */}
-          <div style={{ fontSize: 52, marginBottom: 20, filter: "drop-shadow(0 0 20px rgba(108,71,255,0.6))" }}>🔒</div>
+        <div style={{ maxWidth: 1080, margin: "0 auto", padding: "56px 20px 80px" }}>
 
-          {/* Badge */}
-          <div style={{ background: "rgba(255,68,68,0.12)", border: "1px solid rgba(255,68,68,0.35)", borderRadius: 20, padding: "5px 18px", display: "inline-block", color: "#ff6b6b", fontSize: 11, fontWeight: 800, letterSpacing: "1.5px", marginBottom: 28 }}>
-            FREE ANALYSIS USED
+          {/* Header */}
+          <div style={{ textAlign: "center", marginBottom: 52 }}>
+            <div style={{ fontSize: 56, marginBottom: 20, display: "inline-block", animation: "uw-float 3.5s ease-in-out infinite" }}>🔒</div>
+            <div style={{ background: "rgba(255,68,68,0.12)", border: "1px solid rgba(255,68,68,0.3)", borderRadius: 20, padding: "5px 18px", display: "inline-block", color: "#ff6b6b", fontSize: 11, fontWeight: 800, letterSpacing: "1.5px", marginBottom: 24 }}>
+              FREE ANALYSIS USED
+            </div>
+            <h2 style={{ color: "white", fontSize: "clamp(24px,5vw,38px)", fontWeight: 900, marginBottom: 14, lineHeight: 1.2 }}>
+              You&apos;ve used your free analysis
+            </h2>
+            <p style={{ color: "#666", fontSize: 16, lineHeight: 1.8, maxWidth: 500, margin: "0 auto" }}>
+              Pick a plan below to keep validating products, discovering winning angles, and launching with confidence.
+            </p>
           </div>
 
-          <h2 style={{ color: "white", fontSize: "clamp(22px,5vw,30px)", fontWeight: 900, marginBottom: 14, lineHeight: 1.2 }}>
-            You&apos;ve used your free analysis
-          </h2>
-          <p style={{ color: "#777", fontSize: 15, lineHeight: 1.75, marginBottom: 36, maxWidth: 380, margin: "0 auto 36px" }}>
-            Upgrade to keep validating products, unlocking competitor intelligence, and building winning campaigns — without limits.
-          </p>
-
-          {/* Feature list */}
-          <div style={{ background: "#111", border: "1px solid #1a1a1a", borderRadius: 16, padding: "20px 24px", marginBottom: 32, textAlign: "left" }}>
-            {[
-              ["✦", "Unlimited product analyses"],
-              ["✦", "Full competitor ad library"],
-              ["✦", "Untapped angle discovery"],
-              ["✦", "AI-powered launch plans"],
-              ["✦", "Private supplier network"],
-            ].map(([icon, text]) => (
-              <div key={text} style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 0", borderBottom: "1px solid #1a1a1a" }}>
-                <span style={{ color: "#6c47ff", fontSize: 12, flexShrink: 0 }}>{icon}</span>
-                <span style={{ color: "#bbb", fontSize: 14 }}>{text}</span>
+          {/* Plan cards */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 18, marginBottom: 44 }}>
+            {UPGRADE_PLANS.map((plan) => (
+              <div
+                key={plan.key}
+                style={{
+                  background: "#0c0c14",
+                  border: `1px solid ${"popular" in plan && plan.popular ? "rgba(108,71,255,0.55)" : "#1a1a1a"}`,
+                  borderRadius: 20,
+                  padding: "28px 24px",
+                  position: "relative",
+                  boxShadow: "popular" in plan && plan.popular ? "0 0 48px rgba(108,71,255,0.22)" : "none",
+                }}
+              >
+                {"popular" in plan && plan.popular && (
+                  <div style={{ position: "absolute", top: -13, left: "50%", transform: "translateX(-50%)", background: "#6c47ff", borderRadius: 20, padding: "4px 18px", fontSize: 10, fontWeight: 800, color: "white", whiteSpace: "nowrap", letterSpacing: "1px" }}>
+                    MOST POPULAR
+                  </div>
+                )}
+                <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 4 }}>
+                  <span style={{ color: "white", fontWeight: 900, fontSize: 30 }}>{plan.price}</span>
+                  <span style={{ color: "#444", fontSize: 14 }}>/mo</span>
+                </div>
+                <div style={{ color: plan.color, fontSize: 13, fontWeight: 700, marginBottom: 3 }}>{plan.label}</div>
+                <div style={{ color: "#555", fontSize: 13, marginBottom: 20 }}>{plan.tagline}</div>
+                <div style={{ marginBottom: 24 }}>
+                  {plan.features.map((f) => (
+                    <div key={f} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "5px 0", color: "#999", fontSize: 13 }}>
+                      <span style={{ color: plan.color, fontSize: 11, marginTop: 2, flexShrink: 0 }}>✓</span>
+                      {f}
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  disabled={subscribingPlan !== null}
+                  onClick={() => void subscribeToPlan(plan.key)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 8,
+                    width: "100%",
+                    background: "popular" in plan && plan.popular ? "#6c47ff" : "transparent",
+                    border: `2px solid ${"popular" in plan && plan.popular ? "#6c47ff" : plan.color}`,
+                    borderRadius: 12,
+                    padding: "14px",
+                    color: "popular" in plan && plan.popular ? "white" : plan.color,
+                    fontSize: 15,
+                    fontWeight: 700,
+                    cursor: subscribingPlan !== null ? "not-allowed" : "pointer",
+                    opacity: subscribingPlan !== null && subscribingPlan !== plan.key ? 0.35 : 1,
+                    transition: "all 0.2s",
+                    boxShadow: "popular" in plan && plan.popular ? "0 6px 24px rgba(108,71,255,0.38)" : "none",
+                  }}
+                >
+                  {subscribingPlan === plan.key ? (
+                    <>
+                      <span style={{ width: 15, height: 15, border: "2px solid currentColor", borderTopColor: "transparent", borderRadius: "50%", display: "inline-block", animation: "uw-spin 0.8s linear infinite" }} />
+                      Redirecting…
+                    </>
+                  ) : (
+                    `Get ${plan.label} →`
+                  )}
+                </button>
               </div>
             ))}
           </div>
 
-          {/* Upgrade CTA */}
-          <a
-            href="/pricing"
-            style={{
-              display: "block",
-              background: "linear-gradient(135deg, #6c47ff, #9b7cff)",
-              border: "none",
-              borderRadius: 14,
-              padding: "16px 32px",
-              color: "white",
-              fontSize: 16,
-              fontWeight: 800,
-              textDecoration: "none",
-              marginBottom: 16,
-              boxShadow: "0 8px 32px rgba(108,71,255,0.45)",
-              transition: "opacity 0.2s",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.88"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}
-          >
-            Upgrade Now — View Plans →
-          </a>
+          {/* Footer */}
+          <div style={{ textAlign: "center" }}>
+            <p style={{ color: "#3a3a3a", fontSize: 13, marginBottom: 18 }}>
+              7-day money-back guarantee · Cancel anytime · No hidden fees
+            </p>
+            <button
+              type="button"
+              onClick={() => void handleLogout()}
+              style={{ background: "transparent", border: "1px solid #1a1a1a", borderRadius: 8, padding: "9px 22px", color: "#444", fontSize: 13, cursor: "pointer", transition: "color 0.2s, border-color 0.2s" }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "#888"; e.currentTarget.style.borderColor = "#333"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "#444"; e.currentTarget.style.borderColor = "#1a1a1a"; }}
+            >
+              Sign out
+            </button>
+          </div>
 
-          {/* Sign out escape */}
-          <button
-            type="button"
-            onClick={() => void handleLogout()}
-            style={{ background: "transparent", border: "none", color: "#444", fontSize: 13, cursor: "pointer", padding: "8px 16px", transition: "color 0.2s" }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "#888"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "#444"; }}
-          >
-            Sign out
-          </button>
         </div>
       </div>
     );

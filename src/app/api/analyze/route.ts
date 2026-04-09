@@ -6,19 +6,32 @@ import { runFullAnalysis, type AnalyzeInput } from "@/lib/analyze-pipeline";
 const FREE_ANALYSIS_LIMIT = 1;
 const PAID_PLANS = ["starter", "pro", "agency", "enterprise"] as const;
 
+interface UsageInfo {
+  /** Non-null means the request should be blocked with this response */
+  blockResponse: NextResponse | null;
+  /** Whether the user is on the free plan (needs count increment + wall trigger) */
+  isFreeUser: boolean;
+  /** Atomically increment analysis_count in Supabase; returns the new count */
+  increment: () => Promise<number>;
+}
+
 /**
- * Server-side usage limit check.
- * Validates the user's JWT, reads their plan from profiles, and counts
- * existing analyses. Returns an error response if they are over-limit,
- * or null if the request is allowed to proceed.
+ * Server-side usage check + increment helper.
+ *
+ * - Paid users:  allowed, increment is a no-op.
+ * - Free user within limit: allowed, increment runs after analysis.
+ * - Free user over limit:   blocked with HTTP 402.
+ * - No token / DB error:    allowed (fail open).
  */
-async function checkUsageLimit(req: NextRequest): Promise<NextResponse | null> {
+async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
+  const noop: UsageInfo = { blockResponse: null, isFreeUser: false, increment: async () => 0 };
+
   const token = req.headers.get("Authorization")?.replace("Bearer ", "").trim();
-  if (!token) return null; // No token — allow (unauthenticated edge case)
+  if (!token) return noop;
 
   const supabaseUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL ?? "").trim();
   const supabaseKey = (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "").trim();
-  if (!supabaseUrl || !supabaseKey || supabaseUrl.includes("placeholder")) return null;
+  if (!supabaseUrl || !supabaseKey || supabaseUrl.includes("placeholder")) return noop;
 
   try {
     const client = createClient(supabaseUrl, supabaseKey, {
@@ -27,46 +40,59 @@ async function checkUsageLimit(req: NextRequest): Promise<NextResponse | null> {
     });
 
     const { data: { user }, error: userErr } = await client.auth.getUser();
-    if (userErr || !user?.id) return null;
+    if (userErr || !user?.id) return noop;
 
-    // Fetch the user's plan
+    const userId = user.id;
+
+    // Fetch plan + analysis_count in one query
     const { data: profile } = await client
       .from("profiles")
-      .select("plan")
-      .eq("id", user.id)
+      .select("plan, analysis_count")
+      .eq("id", userId)
       .maybeSingle();
 
     const plan = String(profile?.plan ?? "free");
-    if ((PAID_PLANS as readonly string[]).includes(plan)) return null; // Paid — no limit
 
-    // Count existing analyses for this user
-    const { count, error: countErr } = await client
-      .from("analyses")
-      .select("id", { count: "exact", head: true })
-      .eq("user_id", user.id);
+    // Paid users have no limit
+    if ((PAID_PLANS as readonly string[]).includes(plan)) return noop;
 
-    if (countErr) {
-      console.error("[analyze] limit count error:", countErr.message);
-      return null; // Fail open — don't block on DB error
+    const analysisCount = Number(profile?.analysis_count ?? 0);
+
+    // Free user over limit → block
+    if (analysisCount >= FREE_ANALYSIS_LIMIT) {
+      return {
+        blockResponse: NextResponse.json(
+          {
+            error: "LIMIT_REACHED",
+            message: `You've used your ${FREE_ANALYSIS_LIMIT} free analysis. Upgrade to continue.`,
+          },
+          { status: 402 },
+        ),
+        isFreeUser: true,
+        increment: async () => analysisCount,
+      };
     }
 
-    if ((count ?? 0) >= FREE_ANALYSIS_LIMIT) {
-      return NextResponse.json(
-        {
-          error: "LIMIT_REACHED",
-          message: `You've used your ${FREE_ANALYSIS_LIMIT} free analysis. Upgrade to continue.`,
-          analyses_used: count,
-          limit: FREE_ANALYSIS_LIMIT,
-        },
-        { status: 402 },
-      );
-    }
+    // Free user within limit — provide atomic increment closure
+    const increment = async (): Promise<number> => {
+      try {
+        const { data } = await client.rpc("increment_analysis_count", { uid: userId });
+        return Number(data ?? analysisCount + 1);
+      } catch {
+        // Fallback: direct update (less safe but better than nothing)
+        await client
+          .from("profiles")
+          .update({ analysis_count: analysisCount + 1 })
+          .eq("id", userId);
+        return analysisCount + 1;
+      }
+    };
+
+    return { blockResponse: null, isFreeUser: true, increment };
   } catch (err) {
-    console.error("[analyze] limit check exception:", err);
-    // Fail open — never block on unexpected error
+    console.error("[analyze] usage check exception:", err);
+    return noop; // Fail open — never block on unexpected error
   }
-
-  return null;
 }
 
 export const maxDuration = 120;
@@ -537,8 +563,8 @@ export async function POST(req: NextRequest) {
   console.log("Analyze API:", new Date().toISOString());
 
   // ── Server-side usage limit enforcement ──────────────────────────────────
-  const limitBlock = await checkUsageLimit(req);
-  if (limitBlock) return limitBlock;
+  const usage = await resolveUsage(req);
+  if (usage.blockResponse) return usage.blockResponse;
   // ─────────────────────────────────────────────────────────────────────────
 
   try {
@@ -550,7 +576,13 @@ export async function POST(req: NextRequest) {
 
     if (product_name && search_query) {
       const report = await runDashboardAnalysis(product_name, search_query, asin || undefined);
-      return NextResponse.json({ success: true, report });
+      // Increment analysis_count for free users and signal if they just hit the limit
+      let freeLimitReached = false;
+      if (usage.isFreeUser) {
+        const newCount = await usage.increment();
+        freeLimitReached = newCount >= FREE_ANALYSIS_LIMIT;
+      }
+      return NextResponse.json({ success: true, report, free_limit_reached: freeLimitReached });
     }
 
     if (!body.inputType || !["image", "url", "text"].includes(String(body.inputType))) {
@@ -589,7 +621,12 @@ export async function POST(req: NextRequest) {
     };
 
     const report = await runFullAnalysis(input);
-    return NextResponse.json(report);
+    let freeLimitReached = false;
+    if (usage.isFreeUser) {
+      const newCount = await usage.increment();
+      freeLimitReached = newCount >= FREE_ANALYSIS_LIMIT;
+    }
+    return NextResponse.json({ ...report, free_limit_reached: freeLimitReached });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Analysis failed";
     console.error("Analysis error:", error);
