@@ -1014,28 +1014,31 @@ export default function DashboardPage() {
   };
 
   const subscribeToPlan = async (planKey: string) => {
-    const priceIds: Record<string, string> = {
-      starter:    process.env.NEXT_PUBLIC_STRIPE_PRICE_STARTER    ?? "",
-      pro:        process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO        ?? "",
-      enterprise: process.env.NEXT_PUBLIC_STRIPE_PRICE_ENTERPRISE ?? "",
-    };
-    const priceId = priceIds[planKey];
-    if (!priceId) { router.push("/pricing"); return; }
+    const validPlans = ["starter", "pro", "agency"];
+    if (!validPlans.includes(planKey)) { router.push("/pricing"); return; }
     setSubscribingPlan(planKey);
     try {
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token ?? "";
+      // Send planKey to the server — it resolves the Stripe price ID from
+      // STRIPE_PRICE_STARTER / STRIPE_PRICE_PRO / STRIPE_PRICE_AGENCY env vars
       const res = await fetch("/api/stripe/checkout", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ priceId }),
+        body: JSON.stringify({ planKey }),
       });
-      const json = (await res.json()) as { url?: string };
-      if (json.url) { window.location.href = json.url; } else { router.push("/pricing"); }
-    } catch {
+      const json = (await res.json()) as { url?: string; error?: string };
+      if (json.url) {
+        window.location.href = json.url;
+      } else {
+        console.error("[subscribeToPlan] No checkout URL:", json.error);
+        router.push("/pricing");
+      }
+    } catch (err) {
+      console.error("[subscribeToPlan] Error:", err);
       setSubscribingPlan(null);
       router.push("/pricing");
     }
@@ -2525,8 +2528,8 @@ export default function DashboardPage() {
         ],
       },
       {
-        key: "enterprise",
-        label: "Enterprise",
+        key: "agency",
+        label: "Agency",
         price: "$89.90",
         tagline: "Agencies & power sellers",
         color: "#f59e0b",
@@ -2593,7 +2596,7 @@ export default function DashboardPage() {
               >
                 {"popular" in plan && plan.popular && (
                   <div style={{ position: "absolute", top: -13, left: "50%", transform: "translateX(-50%)", background: "#6c47ff", borderRadius: 20, padding: "4px 18px", fontSize: 10, fontWeight: 800, color: "white", whiteSpace: "nowrap", letterSpacing: "1px" }}>
-                    MOST POPULAR
+                    PRO
                   </div>
                 )}
                 <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 4 }}>

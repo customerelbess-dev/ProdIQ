@@ -397,7 +397,7 @@ export function DashboardSettingsModal({
                             marginBottom: 8,
                           }}
                         >
-                          MOST POPULAR
+                          PRO
                         </div>
                       ) : null}
                       <div style={{ color: "white", fontWeight: 700, fontSize: 15, marginBottom: 4 }}>{plan.name}</div>

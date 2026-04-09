@@ -8,7 +8,7 @@ import type { User } from "@supabase/supabase-js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type Billing = "monthly" | "annual";
-type PlanKey = "starter" | "pro" | "enterprise";
+type PlanKey = "starter" | "pro" | "agency";
 
 // ─── Static plan data (fully hardcoded — zero build-time fetching) ────────────
 const PLANS: Record<
@@ -30,8 +30,8 @@ const PLANS: Record<
     accent: "#6c47ff",
     popular: true,
   },
-  enterprise: {
-    label: "Enterprise",
+  agency: {
+    label: "Agency",
     monthlyPrice: 89.9,
     annualFactor: 0.8,
     tagline: "For agencies and power sellers at scale",
@@ -67,7 +67,7 @@ const FEATURES: Record<PlanKey, { ok: boolean; text: string }[]> = {
     { ok: false, text: "White label reports" },
     { ok: false, text: "API access" },
   ],
-  enterprise: [
+  agency: [
     { ok: true, text: "Unlimited analyses" },
     { ok: true, text: "Everything in Pro" },
     { ok: true, text: "Unlimited ad scripts" },
@@ -149,7 +149,7 @@ function PricingInner() {
     }
   }, []);
 
-  // ── Subscribe handler — Stripe only called here, never at load time ────────
+  // ── Subscribe handler — sends planKey to the server; server resolves priceId ─
   async function handleSubscribe(planKey: PlanKey) {
     setError("");
 
@@ -158,37 +158,20 @@ function PricingInner() {
       return;
     }
 
-    // Price IDs are read only when the user actually clicks, not at module load
-    const priceId = (() => {
-      try {
-        const map: Record<PlanKey, string> = {
-          starter:    process.env.NEXT_PUBLIC_STRIPE_PRICE_STARTER    ?? "",
-          pro:        process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO        ?? "",
-          enterprise: process.env.NEXT_PUBLIC_STRIPE_PRICE_ENTERPRISE ?? "",
-        };
-        return map[planKey];
-      } catch {
-        return "";
-      }
-    })();
-
-    if (!priceId) {
-      setError(`Payment is not yet configured for the ${planKey} plan. Please contact support.`);
-      return;
-    }
-
     setLoading(planKey);
     try {
       const { data: sessionData } = await supabase.auth.getSession();
       const token = sessionData.session?.access_token ?? "";
 
+      // Send the plan key — the API route looks up the Stripe price ID server-side
+      // using STRIPE_PRICE_STARTER / STRIPE_PRICE_PRO / STRIPE_PRICE_AGENCY
       const res = await fetch("/api/stripe/checkout", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ priceId }),
+        body: JSON.stringify({ planKey }),
       });
 
       const json = (await res.json()) as { url?: string; error?: string };
@@ -255,7 +238,7 @@ function PricingInner() {
 
         {/* Plan cards */}
         <div className="mt-16 grid grid-cols-1 items-stretch gap-8 lg:grid-cols-3 lg:items-center">
-          {(["starter", "pro", "enterprise"] as PlanKey[]).map((key) => {
+          {(["starter", "pro", "agency"] as PlanKey[]).map((key) => {
             const plan = PLANS[key];
             const price = plan.monthlyPrice * (showAnnual ? plan.annualFactor : 1);
             const isPro = !!plan.popular;
@@ -266,15 +249,12 @@ function PricingInner() {
                 className={`flex flex-col rounded-2xl bg-[#111111] p-8 ${isPro ? "border border-[rgba(108,71,255,0.5)] lg:scale-[1.04] lg:py-10" : "border border-[#1a1a1a]"}`}
                 style={isPro ? { boxShadow: "0 0 40px rgba(108,71,255,0.3)" } : undefined}
               >
-                {isPro ? (
-                  <p className="inline-block w-fit rounded-full bg-[#6c47ff] px-3 py-1 text-xs font-bold uppercase tracking-wider text-white">
-                    MOST POPULAR
-                  </p>
-                ) : (
-                  <p className={`text-xs font-bold uppercase tracking-wider`} style={{ color: plan.accent }}>
-                    {plan.label.toUpperCase()}
-                  </p>
-                )}
+                <p
+                  className={`text-xs font-bold uppercase tracking-wider ${isPro ? "inline-block w-fit rounded-full bg-[#6c47ff] px-3 py-1 text-white" : ""}`}
+                  style={isPro ? undefined : { color: plan.accent }}
+                >
+                  {plan.label.toUpperCase()}
+                </p>
 
                 <div className="mt-4 flex items-baseline gap-1">
                   <span className="text-5xl font-bold text-white">${fmt(price)}</span>
@@ -310,14 +290,14 @@ function PricingInner() {
                     disabled={loading !== null}
                     onClick={() => void handleSubscribe(key)}
                     className={`mt-8 flex w-full items-center justify-center rounded-[22px] py-3.5 text-[15px] font-semibold text-white transition disabled:opacity-60 ${
-                      key === "enterprise"
+                      key === "agency"
                         ? "border-2 border-amber-500/60 hover:border-amber-400"
                         : "border border-[#333333] hover:border-[#6c47ff] hover:text-[#a78bfa]"
                     }`}
                   >
                     {loading === key ? (
                       <span className="inline-flex items-center gap-2">
-                        <span className={`h-4 w-4 animate-spin rounded-full border-2 border-t-transparent ${key === "enterprise" ? "border-amber-400" : "border-white"}`} />
+                        <span className={`h-4 w-4 animate-spin rounded-full border-2 border-t-transparent ${key === "agency" ? "border-amber-400" : "border-white"}`} />
                         Redirecting…
                       </span>
                     ) : `Get ${plan.label}`}

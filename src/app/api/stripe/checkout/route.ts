@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
-import { buildPriceToPlan } from "@/lib/stripe";
+import { getPriceId, PLAN_NAMES, type PlanKey } from "@/lib/stripe";
 
 function getStripe() {
   const key = process.env.STRIPE_SECRET_KEY?.trim();
@@ -18,24 +18,39 @@ function getServiceSupabase() {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as { priceId?: string };
-    const priceId = String(body.priceId ?? "").trim();
+    const body = (await req.json()) as { planKey?: string };
+    const planKey = String(body.planKey ?? "").trim().toLowerCase() as PlanKey;
 
-    if (!priceId) {
-      return NextResponse.json({ error: "priceId is required" }, { status: 400 });
+    // ── Validate plan key ─────────────────────────────────────────────────────
+    if (!planKey || !(planKey in PLAN_NAMES)) {
+      console.error("[stripe/checkout] Invalid or missing planKey:", planKey);
+      return NextResponse.json(
+        { error: `Invalid plan. Must be one of: ${Object.keys(PLAN_NAMES).join(", ")}` },
+        { status: 400 },
+      );
     }
 
-    const planName = buildPriceToPlan()[priceId];
-    if (!planName) {
-      return NextResponse.json({ error: "Invalid price ID" }, { status: 400 });
+    // ── Resolve price ID from server-side env var ─────────────────────────────
+    let priceId: string;
+    try {
+      priceId = getPriceId(planKey);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Price ID lookup failed";
+      console.error("[stripe/checkout] Price ID error:", msg);
+      return NextResponse.json({ error: msg }, { status: 503 });
     }
 
+    const planName = PLAN_NAMES[planKey];
+    console.log(`[stripe/checkout] plan=${planKey} priceId=${priceId} planName=${planName}`);
+
+    // ── Stripe client ─────────────────────────────────────────────────────────
     const stripe = getStripe();
     if (!stripe) {
-      return NextResponse.json({ error: "Stripe is not configured" }, { status: 503 });
+      console.error("[stripe/checkout] STRIPE_SECRET_KEY is not set");
+      return NextResponse.json({ error: "Stripe is not configured on the server" }, { status: 503 });
     }
 
-    // ── Identify the logged-in user ──────────────────────────────────────────
+    // ── Identify the logged-in user ───────────────────────────────────────────
     const token = req.headers.get("Authorization")?.replace("Bearer ", "").trim();
     let userId = "";
     let userEmail = "";
@@ -45,22 +60,25 @@ export async function POST(req: NextRequest) {
       const supabaseUrl  = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ?? "";
       const supabaseAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim() ?? "";
       if (supabaseUrl && supabaseAnon && !supabaseUrl.includes("placeholder")) {
-        const userClient = createClient(supabaseUrl, supabaseAnon, {
-          global: { headers: { Authorization: `Bearer ${token}` } },
-          auth: { persistSession: false },
-        });
-        const { data: { user } } = await userClient.auth.getUser();
-        if (user) {
-          userId    = user.id;
-          userEmail = user.email ?? "";
-
-          // Check for existing Stripe customer ID saved in profiles
-          const { data: profile } = await userClient
-            .from("profiles")
-            .select("stripe_customer_id")
-            .eq("id", user.id)
-            .maybeSingle();
-          existingCustomerId = String(profile?.stripe_customer_id ?? "").trim();
+        try {
+          const userClient = createClient(supabaseUrl, supabaseAnon, {
+            global: { headers: { Authorization: `Bearer ${token}` } },
+            auth: { persistSession: false },
+          });
+          const { data: { user } } = await userClient.auth.getUser();
+          if (user) {
+            userId    = user.id;
+            userEmail = user.email ?? "";
+            const { data: profile } = await userClient
+              .from("profiles")
+              .select("stripe_customer_id")
+              .eq("id", user.id)
+              .maybeSingle();
+            existingCustomerId = String(profile?.stripe_customer_id ?? "").trim();
+            console.log(`[stripe/checkout] user=${userId} existingCustomer=${existingCustomerId || "none"}`);
+          }
+        } catch (err) {
+          console.warn("[stripe/checkout] Could not identify user:", err);
         }
       }
     }
@@ -73,8 +91,8 @@ export async function POST(req: NextRequest) {
         metadata: { supabase_user_id: userId },
       });
       customerId = customer.id;
+      console.log(`[stripe/checkout] created new Stripe customer=${customerId}`);
 
-      // Save the new customer ID immediately
       if (userId) {
         const supa = getServiceSupabase();
         if (supa) {
@@ -85,12 +103,14 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── Determine app origin for redirect URLs ────────────────────────────────
+    // ── App origin for redirect URLs ──────────────────────────────────────────
     const origin =
       process.env.NEXT_PUBLIC_APP_URL?.trim() ||
       req.headers.get("origin") ||
-      req.headers.get("referer")?.replace(/\/$/, "") ||
+      req.headers.get("referer")?.replace(/\/[^/]*$/, "") ||
       "https://prodiq.app";
+
+    console.log(`[stripe/checkout] creating session origin=${origin} plan=${planName} price=${priceId}`);
 
     // ── Create Checkout Session ───────────────────────────────────────────────
     const session = await stripe.checkout.sessions.create({
@@ -107,10 +127,12 @@ export async function POST(req: NextRequest) {
       },
     });
 
+    console.log(`[stripe/checkout] session created id=${session.id} url=${session.url?.slice(0, 60)}…`);
     return NextResponse.json({ url: session.url });
+
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Checkout error";
-    console.error("[stripe/checkout]", err);
+    console.error("[stripe/checkout] Unhandled error:", err);
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
