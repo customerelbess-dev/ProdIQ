@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@supabase/supabase-js";
 import { runFullAnalysis, type AnalyzeInput } from "@/lib/analyze-pipeline";
-import { PLAN_LIMITS, nextPlanUp } from "@/lib/stripe";
+import { nextPlanUp } from "@/lib/stripe";
 
 interface UsageInfo {
   /** Non-null means the request should be blocked with this response */
@@ -17,17 +17,33 @@ interface UsageInfo {
 }
 
 /**
+ * Determine which period to count analyses for, based on plan name.
+ * - free: count all-time rows (analysis_count from profiles is the source of truth)
+ * - starter / pro: count rows created today (resets naturally each day)
+ * - agency / enterprise: unlimited (skip check entirely)
+ */
+function periodForPlan(plan: string): "total" | "daily" | "unlimited" {
+  if (plan === "agency" || plan === "enterprise") return "unlimited";
+  if (plan === "free") return "total";
+  return "daily"; // starter, pro
+}
+
+/** Human-readable quota label for 402 error messages */
+function quotaLabel(limit: number, period: "total" | "daily"): string {
+  if (period === "total") return `${limit} total analysis${limit === 1 ? "" : "s"}`;
+  return `${limit} analysis${limit === 1 ? "" : "es"} per day`;
+}
+
+/**
  * Server-side usage check.
  *
- * Source of truth: count rows in the `analyses` table for this user.
+ * Source of truth for limits: `analysis_limit` column in the `profiles` table.
+ * Source of truth for usage count: rows in the `analyses` table.
+ *   - free plan: counts all-time rows (never resets)
+ *   - starter/pro: counts rows created today (resets automatically at midnight)
  *
- * Plan limits (from PLAN_LIMITS in @/lib/stripe):
- *   free     → 1 total all-time
- *   starter  → 15 per day
- *   pro      → 30 per day
- *   agency   → unlimited
- *
- * Fails open (allows the request) on any infrastructure error.
+ * Fails open (allows the request) on any infrastructure error so a misconfigured
+ * Supabase connection never blocks a legitimate user.
  */
 async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
   const noop: UsageInfo = { blockResponse: null, shouldRecord: false, recordUsage: async () => {} };
@@ -50,10 +66,10 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
 
     const userId = user.id;
 
-    // ── 1. Read plan from profiles ──────────────────────────────────────────
+    // ── 1. Read plan + limits directly from profiles table ─────────────────
     const { data: profile, error: profileErr } = await client
       .from("profiles")
-      .select("plan, analysis_count")
+      .select("plan, analysis_count, analysis_limit")
       .eq("id", userId)
       .maybeSingle();
 
@@ -61,47 +77,58 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
       console.error(`[analyze] profiles read error for user=${userId}:`, profileErr.message);
     }
 
-    const plan = String(profile?.plan ?? "free");
-    const planConfig = PLAN_LIMITS[plan] ?? PLAN_LIMITS["free"];
+    const plan           = String(profile?.plan ?? "free");
+    const analysisCount  = Number(profile?.analysis_count ?? 0);
+    // analysis_limit from DB: null means unlimited (agency), number means capped
+    const analysisLimit: number | null =
+      profile?.analysis_limit == null ? null : Number(profile.analysis_limit);
+
+    const period = periodForPlan(plan);
 
     console.log(`[analyze] ── plan check ──`);
-    console.log(`[analyze]   user_id=${userId}`);
-    console.log(`[analyze]   profile row found=${profile !== null}`);
-    console.log(`[analyze]   plan from DB="${plan}" (raw="${profile?.plan ?? "(null)"}")`);
-    console.log(`[analyze]   planConfig=${JSON.stringify(planConfig)}`);
+    console.log(`[analyze]   user_id        = ${userId}`);
+    console.log(`[analyze]   profile found  = ${profile !== null}`);
+    console.log(`[analyze]   plan           = "${plan}"`);
+    console.log(`[analyze]   analysis_count = ${analysisCount}`);
+    console.log(`[analyze]   analysis_limit = ${analysisLimit ?? "unlimited"}`);
+    console.log(`[analyze]   period         = ${period}`);
 
-    // Unlimited plan — allow immediately
-    if (planConfig.limit === null) {
-      console.log(`[analyze]   unlimited plan — allowing without count check`);
+    // Unlimited plan — allow immediately without counting
+    if (period === "unlimited" || analysisLimit === null) {
+      console.log(`[analyze]   → unlimited plan — allowing`);
       return noop;
     }
 
     // ── 2. Count analyses for the relevant period ───────────────────────────
-    let query = client
-      .from("analyses")
-      .select("id", { count: "exact", head: true })
-      .eq("user_id", userId);
+    let usedCount: number;
 
-    if (planConfig.period === "daily") {
-      // Count only today's analyses
+    if (period === "total") {
+      // For free plan use analysis_count from profiles (fastest — no extra query)
+      usedCount = analysisCount;
+    } else {
+      // For paid daily plans count rows in analyses table created today
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
-      query = query.gte("created_at", todayStart.toISOString());
+
+      const { count, error: countErr } = await client
+        .from("analyses")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .gte("created_at", todayStart.toISOString());
+
+      if (countErr) {
+        console.error("[analyze] count error — failing open:", countErr.message);
+        return noop;
+      }
+      usedCount = count ?? 0;
     }
 
-    const { count, error: countErr } = await query;
-    if (countErr) {
-      console.error("[analyze] count error — failing open:", countErr.message);
-      return noop;
-    }
-
-    const analysesCount = count ?? 0;
-    const limit = planConfig.limit;
-    console.log(`[analyze] user=${userId} plan=${plan} period=${planConfig.period} used=${analysesCount}/${limit}`);
+    console.log(`[analyze]   used=${usedCount}/${analysisLimit} (${period})`);
 
     // ── 3. Block if at or over limit ────────────────────────────────────────
-    if (analysesCount >= limit) {
+    if (usedCount >= analysisLimit) {
       const suggested = nextPlanUp(plan);
+      const label = quotaLabel(analysisLimit, period);
       return {
         blockResponse: NextResponse.json(
           {
@@ -109,10 +136,10 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
             message:
               plan === "free"
                 ? `You've used your 1 free analysis. Upgrade to continue.`
-                : `You've reached your ${planConfig.label}. Upgrade to ${suggested ?? "a higher plan"} for more.`,
+                : `You've reached your ${label}. Upgrade to ${suggested ?? "a higher plan"} for more.`,
             plan,
-            analyses_used: analysesCount,
-            limit,
+            analyses_used: usedCount,
+            limit: analysisLimit,
             next_plan: suggested,
           },
           { status: 402 },
@@ -123,11 +150,15 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
     }
 
     // ── 4. Within limit — record after success ─────────────────────────────
+    // Always increment analysis_count in profiles (used for free-plan total tracking
+    // and as a running lifetime counter for paid users).
     const recordUsage = async () => {
       try {
-        await client.rpc("increment_analysis_count", { uid: userId });
-      } catch {
-        // Silent — the analyses table row count is the real source of truth
+        const { error } = await client.rpc("increment_analysis_count", { uid: userId });
+        if (error) console.error("[analyze] increment_analysis_count error:", error.message);
+        else console.log(`[analyze] analysis_count incremented for user=${userId}`);
+      } catch (err) {
+        console.error("[analyze] increment_analysis_count exception:", err);
       }
     };
 

@@ -224,8 +224,10 @@ export default function DashboardPage() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [user, setUser] = useState<User | null>(null);
 
-  // Usage limiting
+  // Usage limiting — values come from profiles.plan / analysis_count / analysis_limit
   const [userPlan, setUserPlan] = useState<"free" | "starter" | "pro" | "agency" | "enterprise">("free");
+  const [analysisCount, setAnalysisCount] = useState<number>(0);
+  const [analysisLimit, setAnalysisLimit] = useState<number | null>(1); // null = unlimited
   const [showUpgradeWall, setShowUpgradeWall] = useState(false);
   const [subscribingPlan, setSubscribingPlan] = useState<string | null>(null);
 
@@ -330,7 +332,7 @@ export default function DashboardPage() {
       setAuthChecked(true);
       setReady(true);
 
-      // Fetch plan and analyses in parallel
+      // Fetch plan + usage limits + analyses in parallel
       const [analysesResult, profileResult] = await Promise.all([
         supabase
           .from("analyses")
@@ -339,17 +341,26 @@ export default function DashboardPage() {
           .order("created_at", { ascending: false }),
         supabase
           .from("profiles")
-          .select("plan")
+          .select("plan, analysis_count, analysis_limit")
           .eq("id", session.user.id)
           .maybeSingle(),
       ]);
 
-      // Set plan — log full profile result for debugging
-      const fetchedPlan = (profileResult.data?.plan as string) || "free";
+      // Set plan + usage counters
+      const fetchedPlan   = (profileResult.data?.plan as string) || "free";
+      const fetchedCount  = Number(profileResult.data?.analysis_count ?? 0);
+      const fetchedLimit: number | null =
+        profileResult.data?.analysis_limit == null
+          ? null
+          : Number(profileResult.data.analysis_limit);
+
       console.log("[dashboard] profile fetch result:", JSON.stringify(profileResult.data));
       console.log(`[dashboard] profile error: ${profileResult.error?.message ?? "none"}`);
-      console.log(`[dashboard] resolved plan="${fetchedPlan}" for user=${session.user.id}`);
+      console.log(`[dashboard] resolved plan="${fetchedPlan}" count=${fetchedCount} limit=${fetchedLimit ?? "unlimited"} for user=${session.user.id}`);
+
       setUserPlan(fetchedPlan as "free" | "starter" | "pro" | "agency" | "enterprise");
+      setAnalysisCount(fetchedCount);
+      setAnalysisLimit(fetchedLimit);
 
       const { data, error } = analysesResult;
 
@@ -733,47 +744,54 @@ export default function DashboardPage() {
    * Shows the upgrade wall and returns true, or returns false if they can proceed.
    */
   const checkAndBlockIfOverLimit = async (): Promise<boolean> => {
-    // Re-query Supabase for the authoritative plan + count
+    // Re-query Supabase for the authoritative plan + analysis_limit + analysis_count
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.user?.id) return false; // can't check → let server handle it
+      if (!session?.user?.id) return false; // can't check → let server enforce it
 
       const userId = session.user.id;
 
-      // Fetch plan
       const { data: profileData } = await supabase
-        .from("profiles").select("plan").eq("id", userId).maybeSingle();
-      const livePlan = String(profileData?.plan ?? "free");
+        .from("profiles")
+        .select("plan, analysis_count, analysis_limit")
+        .eq("id", userId)
+        .maybeSingle();
 
-      // Sync plan to state
+      const livePlan  = String(profileData?.plan ?? "free");
+      const liveLimit: number | null =
+        profileData?.analysis_limit == null ? null : Number(profileData.analysis_limit);
+      const liveCount = Number(profileData?.analysis_count ?? 0);
+
+      // Sync to state
       setUserPlan(livePlan as "free" | "starter" | "pro" | "agency" | "enterprise");
+      setAnalysisLimit(liveLimit);
+      setAnalysisCount(liveCount);
 
-      // Agency/enterprise = unlimited
-      if (["agency", "enterprise"].includes(livePlan)) return false;
+      // Unlimited plan — never block
+      if (liveLimit === null || ["agency", "enterprise"].includes(livePlan)) return false;
 
-      // Determine limit and query period for this plan
+      // Determine how many analyses to count for this plan
       const isFreePlan = livePlan === "free";
-      const dailyLimit = livePlan === "starter" ? 15 : livePlan === "pro" ? 30 : 1;
+      let used: number;
 
-      let countQuery = supabase
-        .from("analyses")
-        .select("id", { count: "exact", head: true })
-        .eq("user_id", userId);
-
-      if (!isFreePlan) {
-        // For paid plans: count today's analyses only
+      if (isFreePlan) {
+        // Free plan: use analysis_count from profile (total all-time)
+        used = liveCount;
+      } else {
+        // Paid plans: count today's rows in analyses table
         const todayStart = new Date();
         todayStart.setHours(0, 0, 0, 0);
-        countQuery = countQuery.gte("created_at", todayStart.toISOString());
+        const { count: dailyCount } = await supabase
+          .from("analyses")
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", userId)
+          .gte("created_at", todayStart.toISOString());
+        used = dailyCount ?? 0;
       }
 
-      const { count: liveCount } = await countQuery;
-      const used = liveCount ?? 0;
-      const limit = isFreePlan ? 1 : dailyLimit;
+      console.log(`[limit] live check: plan=${livePlan} used=${used} limit=${liveLimit} (${isFreePlan ? "total" : "daily"})`);
 
-      console.log(`[limit] live check: plan=${livePlan} used=${used}/${limit}`);
-
-      if (used >= limit) {
+      if (used >= liveLimit) {
         setShowUpgradeWall(true);
         return true;
       }
@@ -2569,13 +2587,14 @@ export default function DashboardPage() {
     const currentIdx = planOrder.indexOf(userPlan);
     const UPGRADE_PLANS = ALL_PLANS.filter((p) => planOrder.indexOf(p.key) > currentIdx);
 
-    // Dynamic header copy
+    // Dynamic header copy — uses analysisLimit from DB, not hardcoded values
     const isPaidLimit = userPlan !== "free";
+    const limitLabel  = analysisLimit === null ? "unlimited" : String(analysisLimit);
     const limitBadgeText = isPaidLimit
       ? `${userPlan.toUpperCase()} DAILY LIMIT REACHED`
       : "FREE ANALYSIS USED";
     const limitHeading = isPaidLimit
-      ? `You've reached your ${userPlan === "starter" ? "15" : "30"} daily analyses`
+      ? `You've reached your ${limitLabel} daily analyses`
       : "You've used your free analysis";
     const limitSubtext = isPaidLimit
       ? `Upgrade to get more daily analyses and unlock advanced features.`
@@ -2857,7 +2876,8 @@ export default function DashboardPage() {
         user={user}
         analyses={analyses}
         userPlan={userPlan}
-        analysesUsed={analyses.length}
+        analysesUsed={analysisCount}
+        analysesLimit={analysisLimit}
         onLogout={() => void handleLogout()}
         onSubscribe={(planKey) => void subscribeToPlan(planKey)}
         subscribingPlan={subscribingPlan}

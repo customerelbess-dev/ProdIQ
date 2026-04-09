@@ -40,11 +40,10 @@ function planDisplayName(plan: string) {
   return ({ free: "Free", starter: "Starter", pro: "Pro", agency: "Agency", enterprise: "Agency" } as Record<string, string>)[plan]
     ?? (plan.charAt(0).toUpperCase() + plan.slice(1));
 }
-function planQuota(plan: string) {
-  return ({
-    free: "1 total analysis", starter: "15 analyses / day",
-    pro: "30 analyses / day", agency: "Unlimited analyses", enterprise: "Unlimited analyses",
-  } as Record<string, string>)[plan] ?? "—";
+function planQuota(plan: string, limit: number | null) {
+  if (limit === null || ["agency", "enterprise"].includes(plan)) return "Unlimited analyses";
+  if (plan === "free") return `${limit} total analysis`;
+  return `${limit} analyses / day`;
 }
 function planColor(plan: string) {
   return ({ free: "#555", starter: "#888", pro: "#6c47ff", agency: "#f59e0b", enterprise: "#f59e0b" } as Record<string, string>)[plan] ?? "#6c47ff";
@@ -87,6 +86,8 @@ type Props = {
   analyses: SettingsAnalysisRow[];
   userPlan?: string;
   analysesUsed?: number;
+  /** null means unlimited (agency plan); undefined means not yet loaded */
+  analysesLimit?: number | null;
   onLogout?: () => void;
   onSubscribe?: (planKey: string) => void;
   subscribingPlan?: string | null;
@@ -103,6 +104,7 @@ export function DashboardSettingsModal({
   analyses,
   userPlan = "free",
   analysesUsed,
+  analysesLimit,
   onLogout,
   onSubscribe,
   subscribingPlan,
@@ -137,17 +139,19 @@ export function DashboardSettingsModal({
     tips:         false,
   });
 
-  // ── Plan info ───────────────────────────────────────────────────────────────
+  // ── Plan info — driven by analysis_limit from DB, not hardcoded ───────────
   const totalAnalyses = analysesUsed ?? analyses.length;
   const isPaidPlan    = ["starter", "pro", "agency", "enterprise"].includes(userPlan);
-  const quotaLabel    = planQuota(userPlan);
-  const dailyLimit    = userPlan === "starter" ? 15 : userPlan === "pro" ? 30 : null;
+  // analysesLimit comes from profiles.analysis_limit: null = unlimited
+  const effectiveLimit: number | null =
+    analysesLimit !== undefined ? analysesLimit : (userPlan === "free" ? 1 : null);
+  const quotaLabel = planQuota(userPlan, effectiveLimit);
   const remainingLabel =
-    userPlan === "free"
-      ? `${Math.max(0, 1 - totalAnalyses)} of 1 remaining`
-      : dailyLimit !== null
-      ? `${dailyLimit} per day`
-      : "Unlimited";
+    effectiveLimit === null
+      ? "Unlimited"
+      : userPlan === "free"
+      ? `${Math.max(0, effectiveLimit - totalAnalyses)} of ${effectiveLimit} remaining`
+      : `${effectiveLimit} per day`;
 
   // ── Handlers ─────────────────────────────────────────────────────────────────
 
@@ -331,15 +335,15 @@ export function DashboardSettingsModal({
                     <div style={{ textAlign: "right" }}>
                       <div style={{ color: "#555", fontSize: 11, fontWeight: 600, marginBottom: 6 }}>TOTAL ANALYSES</div>
                       <div style={{ color: "white", fontWeight: 800, fontSize: 20 }}>
-                        {userPlan === "free" ? `${totalAnalyses} / 1` : totalAnalyses}
+                        {effectiveLimit !== null ? `${totalAnalyses} / ${effectiveLimit}` : totalAnalyses}
                       </div>
                       <div style={{ color: "#555", fontSize: 11, marginTop: 2 }}>{remainingLabel}</div>
                     </div>
                   </div>
-                  {userPlan === "free" && (
+                  {userPlan === "free" && effectiveLimit !== null && (
                     <div style={{ marginTop: 14 }}>
                       <div style={{ background: "#1a1a1a", borderRadius: 8, height: 6, overflow: "hidden" }}>
-                        <div style={{ width: `${Math.min(100, totalAnalyses * 100)}%`, height: "100%", background: totalAnalyses >= 1 ? "#ff4444" : "#6c47ff", borderRadius: 8, transition: "width 0.5s ease" }} />
+                        <div style={{ width: `${Math.min(100, (totalAnalyses / effectiveLimit) * 100)}%`, height: "100%", background: totalAnalyses >= effectiveLimit ? "#ff4444" : "#6c47ff", borderRadius: 8, transition: "width 0.5s ease" }} />
                       </div>
                     </div>
                   )}

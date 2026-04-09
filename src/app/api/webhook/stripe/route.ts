@@ -79,15 +79,26 @@ function resolvePlanFromPriceId(priceId: string, context: string): string {
   return "starter";
 }
 
+/** Map a plan name to the correct analysis_limit value (null = unlimited). */
+function analysisLimitForPlan(plan: string): number | null {
+  const limits: Record<string, number | null> = {
+    free:       1,
+    starter:    15,
+    pro:        30,
+    agency:     null, // unlimited
+    enterprise: null, // legacy alias
+  };
+  return plan in limits ? limits[plan] : 1; // unknown plan defaults to free
+}
+
 /**
- * Write plan to profiles using the service-role admin client.
+ * Write plan + analysis_limit to profiles using the service-role admin client.
  *
  * Strategy:
- *  1. UPDATE profiles SET plan=X WHERE id=Y  (works even if extra columns are missing)
+ *  1. UPDATE profiles SET plan=X, analysis_count=0, analysis_limit=Y WHERE id=Z
  *  2. If 0 rows affected → user has no profile row yet → INSERT it
  *  3. Separately update Stripe IDs (best-effort)
- *  4. Separately reset analysis_count to 0 (best-effort — column may not exist yet)
- *  5. Read the row back and log it so we can confirm the write in Vercel logs
+ *  4. Read the row back and log it for Vercel log confirmation
  */
 async function setUserPlan(
   supa: ReturnType<typeof getServiceSupabase>,
@@ -98,21 +109,28 @@ async function setUserPlan(
   priceId: string,
   context: string,
 ) {
-  console.log(`[webhook][${context}] ── setUserPlan START ──`);
-  console.log(`[webhook][${context}]   userId   = ${userId}`);
-  console.log(`[webhook][${context}]   plan     = ${plan}`);
-  console.log(`[webhook][${context}]   customer = ${customerId}`);
-  console.log(`[webhook][${context}]   sub      = ${subscriptionId}`);
-  console.log(`[webhook][${context}]   priceId  = ${priceId}`);
+  const analysisLimit = analysisLimitForPlan(plan);
 
-  // ── STEP 1: UPDATE plan + analysis_count in one atomic query ────────────────
-  //   Uses service-role client → bypasses RLS → always has permission to write.
-  //   Requires the migration to have been run so analysis_count column exists.
-  console.log(`[webhook][${context}]   STEP 1: UPDATE profiles SET plan='${plan}', analysis_count=0 WHERE id='${userId}'`);
+  console.log(`[webhook][${context}] ── setUserPlan START ──`);
+  console.log(`[webhook][${context}]   userId         = ${userId}`);
+  console.log(`[webhook][${context}]   plan           = ${plan}`);
+  console.log(`[webhook][${context}]   analysis_limit = ${analysisLimit ?? "unlimited"}`);
+  console.log(`[webhook][${context}]   customer       = ${customerId}`);
+  console.log(`[webhook][${context}]   sub            = ${subscriptionId}`);
+  console.log(`[webhook][${context}]   priceId        = ${priceId}`);
+
+  // ── STEP 1: UPDATE plan + analysis_count + analysis_limit atomically ─────────
+  //   Service-role client bypasses RLS so this always works regardless of policies.
+  //   Requires the migration (20260406000000_ensure_analysis_count.sql) to be run.
+  console.log(
+    `[webhook][${context}]   STEP 1: UPDATE profiles SET ` +
+    `plan='${plan}', analysis_count=0, analysis_limit=${analysisLimit ?? "NULL"} ` +
+    `WHERE id='${userId}'`,
+  );
 
   const { error: updateErr, count: updatedRows } = await supa
     .from("profiles")
-    .update({ plan, analysis_count: 0 })
+    .update({ plan, analysis_count: 0, analysis_limit: analysisLimit })
     .eq("id", userId)
     .select("id", { count: "exact", head: true });
 
@@ -132,15 +150,15 @@ async function setUserPlan(
     console.log(`[webhook][${context}]   STEP 2: profile row not found — inserting new row`);
     const { error: insertErr } = await supa
       .from("profiles")
-      .insert({ id: userId, plan, analysis_count: 0 });
+      .insert({ id: userId, plan, analysis_count: 0, analysis_limit: analysisLimit });
 
     if (insertErr) {
       console.error(`[webhook][${context}]   ❌ INSERT failed: ${insertErr.message} (code=${insertErr.code})`);
       throw new Error(`INSERT profiles failed for user=${userId}: ${insertErr.message}`);
     }
-    console.log(`[webhook][${context}]   INSERT success — new profile row created`);
+    console.log(`[webhook][${context}]   INSERT success — new profile row created with plan=${plan}, analysis_limit=${analysisLimit ?? "null"}`);
   } else {
-    console.log(`[webhook][${context}]   STEP 2: skipped (row already updated in step 1)`);
+    console.log(`[webhook][${context}]   STEP 2: skipped (row updated in step 1)`);
   }
 
   // ── STEP 3: Update Stripe IDs (best-effort, separate query) ──────────────────
@@ -160,11 +178,11 @@ async function setUserPlan(
     else console.log(`[webhook][${context}]   Stripe IDs written`);
   }
 
-  // ── STEP 5: Read back and verify ─────────────────────────────────────────────
-  console.log(`[webhook][${context}]   STEP 5: reading row back to verify…`);
+  // ── STEP 4: Read back and verify ─────────────────────────────────────────────
+  console.log(`[webhook][${context}]   STEP 4: reading row back to verify…`);
   const { data: verify, error: verifyErr } = await supa
     .from("profiles")
-    .select("id, plan, analysis_count, stripe_customer_id, stripe_price_id")
+    .select("id, plan, analysis_count, analysis_limit, stripe_customer_id, stripe_price_id")
     .eq("id", userId)
     .maybeSingle();
 
