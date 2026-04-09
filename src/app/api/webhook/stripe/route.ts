@@ -3,12 +3,14 @@ import Stripe from "stripe";
 import { createClient } from "@supabase/supabase-js";
 import { buildPriceToPlan } from "@/lib/stripe";
 
-// Disable Next.js body parsing — Stripe needs the raw body for signature verification
+// Next.js must NOT parse the body — Stripe needs the raw bytes for signature verification
 export const runtime = "nodejs";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getStripe() {
   const key = process.env.STRIPE_SECRET_KEY?.trim();
-  if (!key) throw new Error("STRIPE_SECRET_KEY not set");
+  if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
   return new Stripe(key, { apiVersion: "2026-03-25.dahlia" });
 }
 
@@ -16,33 +18,70 @@ function getServiceSupabase() {
   const url  = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ?? "";
   const role = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ?? "";
   if (!url || !role || url.includes("placeholder")) {
-    throw new Error("Supabase service role not configured");
+    throw new Error("Supabase service role is not configured (NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY required)");
   }
   return createClient(url, role, { auth: { persistSession: false } });
 }
 
 /**
- * Resolve Supabase user_id from event metadata.
- * Falls back to looking up via stripe_customer_id stored in profiles.
+ * Resolve a Supabase user_id from webhook event data.
+ * Strategy (in order):
+ *   1. session.metadata.user_id
+ *   2. subscription.metadata.user_id
+ *   3. Look up profiles by stripe_customer_id
  */
 async function resolveUserId(
   supa: ReturnType<typeof getServiceSupabase>,
   customerId: string,
   metadata: Stripe.Metadata,
+  context: string,
 ): Promise<string | null> {
-  // Try metadata first (fastest)
-  const fromMeta = String(metadata.user_id ?? "").trim();
-  if (fromMeta) return fromMeta;
+  const fromMeta = String(metadata?.user_id ?? "").trim();
+  if (fromMeta) {
+    console.log(`[webhook][${context}] user_id from metadata: ${fromMeta}`);
+    return fromMeta;
+  }
 
-  // Fall back to looking up by stripe_customer_id
-  const { data } = await supa
+  console.log(`[webhook][${context}] no user_id in metadata, looking up by stripe_customer_id=${customerId}`);
+  const { data, error } = await supa
     .from("profiles")
     .select("id")
     .eq("stripe_customer_id", customerId)
     .maybeSingle();
+
+  if (error) console.error(`[webhook][${context}] profiles lookup error:`, error.message);
+  if (data?.id) console.log(`[webhook][${context}] found user_id via customer lookup: ${data.id}`);
+  else console.warn(`[webhook][${context}] could NOT resolve user_id for customer=${customerId}`);
+
   return data?.id ?? null;
 }
 
+/**
+ * Determine the plan name from a Stripe price ID.
+ * Uses env-var mapping first; falls back to a human-readable guess.
+ */
+function resolvePlanFromPriceId(priceId: string, context: string): string {
+  const priceToPlan = buildPriceToPlan();
+  console.log(`[webhook][${context}] price→plan map:`, JSON.stringify(priceToPlan));
+  console.log(`[webhook][${context}] incoming priceId: ${priceId}`);
+
+  if (priceToPlan[priceId]) {
+    console.log(`[webhook][${context}] matched plan: ${priceToPlan[priceId]}`);
+    return priceToPlan[priceId];
+  }
+
+  // Could not map — log a clear error and default to starter so the user at least gets something
+  console.error(
+    `[webhook][${context}] UNRECOGNISED price ID: ${priceId}. ` +
+    `Check STRIPE_PRICE_STARTER / STRIPE_PRICE_PRO / STRIPE_PRICE_AGENCY env vars. ` +
+    `Defaulting to "starter".`,
+  );
+  return "starter";
+}
+
+/**
+ * Write plan + Stripe IDs to profiles and reset analysis_count to 0.
+ */
 async function setUserPlan(
   supa: ReturnType<typeof getServiceSupabase>,
   userId: string,
@@ -50,7 +89,10 @@ async function setUserPlan(
   customerId: string,
   subscriptionId: string,
   priceId: string,
+  context: string,
 ) {
+  console.log(`[webhook][${context}] writing plan=${plan} to profiles for user=${userId}`);
+
   const { error } = await supa.from("profiles").upsert(
     {
       id: userId,
@@ -58,104 +100,183 @@ async function setUserPlan(
       stripe_customer_id: customerId,
       stripe_subscription_id: subscriptionId,
       stripe_price_id: priceId,
+      // Reset count so the user can immediately run analyses on their new plan
+      analysis_count: 0,
     },
     { onConflict: "id" },
   );
-  if (error) console.error("[webhook] upsert error:", error.message);
-  else console.log(`[webhook] set plan=${plan} for user=${userId}`);
+
+  if (error) {
+    console.error(`[webhook][${context}] upsert FAILED:`, error.message, error.details);
+  } else {
+    console.log(`[webhook][${context}] ✅ plan updated to "${plan}" for user=${userId}, analysis_count reset to 0`);
+  }
 }
+
+// ─── Event handlers ───────────────────────────────────────────────────────────
 
 async function handleCheckoutCompleted(
   supa: ReturnType<typeof getServiceSupabase>,
   stripe: Stripe,
   session: Stripe.Checkout.Session,
 ) {
-  const customerId = String(session.customer ?? "");
-  const subscriptionId = String(session.subscription ?? "");
-  const meta = session.metadata ?? {};
+  const ctx = "checkout.session.completed";
+  console.log(`[webhook][${ctx}] session.id=${session.id}`);
+  console.log(`[webhook][${ctx}] session.customer=${session.customer}`);
+  console.log(`[webhook][${ctx}] session.subscription=${session.subscription}`);
+  console.log(`[webhook][${ctx}] session.metadata=`, JSON.stringify(session.metadata));
+  console.log(`[webhook][${ctx}] session.payment_status=${session.payment_status}`);
 
-  const userId = await resolveUserId(supa, customerId, meta);
-  if (!userId) {
-    console.error("[webhook] checkout.session.completed: could not resolve user_id");
+  const customerId    = String(session.customer ?? "").trim();
+  const subscriptionId = String(session.subscription ?? "").trim();
+  const meta          = session.metadata ?? {};
+
+  if (!customerId) {
+    console.error(`[webhook][${ctx}] no customer ID — cannot proceed`);
     return;
   }
 
-  // Determine plan from metadata or by fetching subscription price
-  let plan = String(meta.plan ?? "").trim();
-  let priceId = "";
-
-  if (!plan && subscriptionId) {
-    const sub = await stripe.subscriptions.retrieve(subscriptionId);
-    priceId = sub.items.data[0]?.price.id ?? "";
-    plan = buildPriceToPlan()[priceId] ?? "starter";
+  const userId = await resolveUserId(supa, customerId, meta, ctx);
+  if (!userId) {
+    console.error(`[webhook][${ctx}] could not resolve user_id — plan NOT updated`);
+    return;
   }
 
-  await setUserPlan(supa, userId, plan || "starter", customerId, subscriptionId, priceId);
+  // ── Determine plan ──────────────────────────────────────────────────────────
+  // Priority: metadata.plan → subscription price ID → session line_items price ID
+  let plan    = String(meta.plan ?? "").trim();
+  let priceId = String(meta.price_id ?? "").trim();
+
+  console.log(`[webhook][${ctx}] plan from metadata: "${plan}", priceId from metadata: "${priceId}"`);
+
+  if (!priceId && subscriptionId) {
+    console.log(`[webhook][${ctx}] fetching subscription to get price ID…`);
+    try {
+      const sub = await stripe.subscriptions.retrieve(subscriptionId);
+      priceId = sub.items.data[0]?.price.id ?? "";
+      console.log(`[webhook][${ctx}] priceId from subscription: ${priceId}`);
+    } catch (err) {
+      console.error(`[webhook][${ctx}] failed to retrieve subscription:`, err);
+    }
+  }
+
+  // If still no priceId, try expanding line_items on the session
+  if (!priceId) {
+    console.log(`[webhook][${ctx}] trying to get priceId from session line_items…`);
+    try {
+      const expanded = await stripe.checkout.sessions.retrieve(session.id, {
+        expand: ["line_items"],
+      });
+      priceId = expanded.line_items?.data[0]?.price?.id ?? "";
+      console.log(`[webhook][${ctx}] priceId from line_items: ${priceId}`);
+    } catch (err) {
+      console.error(`[webhook][${ctx}] failed to expand line_items:`, err);
+    }
+  }
+
+  // Resolve plan name from price ID if not already in metadata
+  if (!plan && priceId) {
+    plan = resolvePlanFromPriceId(priceId, ctx);
+  }
+
+  if (!plan) {
+    console.error(`[webhook][${ctx}] could NOT determine plan — defaulting to "starter"`);
+    plan = "starter";
+  }
+
+  await setUserPlan(supa, userId, plan, customerId, subscriptionId, priceId, ctx);
 }
 
 async function handleSubscriptionUpdated(
   supa: ReturnType<typeof getServiceSupabase>,
   subscription: Stripe.Subscription,
 ) {
-  const customerId = String(subscription.customer ?? "");
-  const subscriptionId = subscription.id;
-  const meta = subscription.metadata ?? {};
+  const ctx = "customer.subscription.updated";
+  console.log(`[webhook][${ctx}] subscription.id=${subscription.id} status=${subscription.status}`);
 
-  const userId = await resolveUserId(supa, customerId, meta);
+  const customerId     = String(subscription.customer ?? "").trim();
+  const subscriptionId = subscription.id;
+  const meta           = subscription.metadata ?? {};
+
+  const userId = await resolveUserId(supa, customerId, meta, ctx);
   if (!userId) {
-    console.error("[webhook] subscription.updated: could not resolve user_id for customer", customerId);
+    console.error(`[webhook][${ctx}] could not resolve user_id — skipping`);
     return;
   }
 
   const priceId = subscription.items.data[0]?.price.id ?? "";
-  const plan = buildPriceToPlan()[priceId] ?? "starter";
-  const status = subscription.status;
+  console.log(`[webhook][${ctx}] priceId=${priceId} status=${subscription.status}`);
 
-  // Only keep paid plan if subscription is active or trialing
-  const activePlan = ["active", "trialing"].includes(status) ? plan : "free";
-  await setUserPlan(supa, userId, activePlan, customerId, subscriptionId, priceId);
+  const mappedPlan = priceId ? resolvePlanFromPriceId(priceId, ctx) : "free";
+  const activePlan = ["active", "trialing"].includes(subscription.status) ? mappedPlan : "free";
+
+  console.log(`[webhook][${ctx}] resolved plan=${activePlan} for user=${userId}`);
+  await setUserPlan(supa, userId, activePlan, customerId, subscriptionId, priceId, ctx);
 }
 
 async function handleSubscriptionDeleted(
   supa: ReturnType<typeof getServiceSupabase>,
   subscription: Stripe.Subscription,
 ) {
-  const customerId = String(subscription.customer ?? "");
-  const meta = subscription.metadata ?? {};
+  const ctx = "customer.subscription.deleted";
+  console.log(`[webhook][${ctx}] subscription.id=${subscription.id}`);
 
-  const userId = await resolveUserId(supa, customerId, meta);
-  if (!userId) return;
+  const customerId = String(subscription.customer ?? "").trim();
+  const meta       = subscription.metadata ?? {};
+
+  const userId = await resolveUserId(supa, customerId, meta, ctx);
+  if (!userId) {
+    console.error(`[webhook][${ctx}] could not resolve user_id — skipping`);
+    return;
+  }
 
   const { error } = await supa
     .from("profiles")
     .update({ plan: "free", stripe_subscription_id: null, stripe_price_id: null })
     .eq("id", userId);
-  if (error) console.error("[webhook] downgrade error:", error.message);
-  else console.log(`[webhook] downgraded user=${userId} to free`);
+
+  if (error) console.error(`[webhook][${ctx}] downgrade error:`, error.message);
+  else console.log(`[webhook][${ctx}] ✅ downgraded user=${userId} to free`);
 }
+
+// ─── Main POST handler ────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   const body = await req.text();
   const sig  = req.headers.get("stripe-signature") ?? "";
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim() ?? "";
 
+  // Log env var presence (not values) so we can debug without exposing secrets
+  console.log("[webhook] env check:", {
+    STRIPE_SECRET_KEY:      !!process.env.STRIPE_SECRET_KEY?.trim(),
+    STRIPE_WEBHOOK_SECRET:  !!process.env.STRIPE_WEBHOOK_SECRET?.trim(),
+    SUPABASE_SERVICE_ROLE:  !!process.env.SUPABASE_SERVICE_ROLE_KEY?.trim(),
+    SUPABASE_URL:           !!process.env.NEXT_PUBLIC_SUPABASE_URL?.trim(),
+    STRIPE_PRICE_STARTER:   !!process.env.STRIPE_PRICE_STARTER?.trim(),
+    STRIPE_PRICE_PRO:       !!process.env.STRIPE_PRICE_PRO?.trim(),
+    STRIPE_PRICE_AGENCY:    !!process.env.STRIPE_PRICE_AGENCY?.trim(),
+  });
+
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim() ?? "";
   if (!webhookSecret) {
-    console.error("[webhook] STRIPE_WEBHOOK_SECRET not set");
-    return NextResponse.json({ error: "Webhook not configured" }, { status: 500 });
+    console.error("[webhook] STRIPE_WEBHOOK_SECRET is not set — cannot verify events");
+    return NextResponse.json({ error: "Webhook secret not configured" }, { status: 500 });
   }
 
+  // ── Verify Stripe signature ──────────────────────────────────────────────────
   let event: Stripe.Event;
   try {
     const stripe = getStripe();
     event = stripe.webhooks.constructEvent(body, sig, webhookSecret);
+    console.log(`[webhook] ✅ signature verified — event.type=${event.type} event.id=${event.id}`);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Signature verification failed";
-    console.error("[webhook] signature error:", msg);
+    console.error("[webhook] ❌ signature error:", msg);
+    console.error("[webhook] sig header present:", !!sig);
+    console.error("[webhook] body length:", body.length);
     return NextResponse.json({ error: msg }, { status: 400 });
   }
 
-  console.log(`[webhook] received: ${event.type}`);
-
+  // ── Handle event ─────────────────────────────────────────────────────────────
   try {
     const stripe = getStripe();
     const supa   = getServiceSupabase();
@@ -173,23 +294,29 @@ export async function POST(req: NextRequest) {
         await handleSubscriptionDeleted(supa, event.data.object as Stripe.Subscription);
         break;
 
-      case "invoice.payment_failed": {
-        // Optionally handle failed payments — for now just log
+      case "invoice.payment_succeeded": {
         const invoice = event.data.object as Stripe.Invoice;
-        console.warn("[webhook] payment_failed for customer:", invoice.customer);
+        console.log(`[webhook] invoice.payment_succeeded for customer=${invoice.customer} amount=${invoice.amount_paid}`);
+        break;
+      }
+
+      case "invoice.payment_failed": {
+        const invoice = event.data.object as Stripe.Invoice;
+        console.warn(`[webhook] ⚠️ invoice.payment_failed for customer=${invoice.customer}`);
         break;
       }
 
       default:
-        // Acknowledge unhandled events without error
+        console.log(`[webhook] unhandled event type: ${event.type} — acknowledged`);
         break;
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Handler error";
-    console.error("[webhook] handler error:", msg);
-    // Return 200 so Stripe doesn't retry — log the error for manual investigation
+    console.error("[webhook] ❌ handler threw:", msg);
+    // Always return 200 so Stripe doesn't retry — the error is logged for investigation
     return NextResponse.json({ error: msg, received: true }, { status: 200 });
   }
 
+  console.log(`[webhook] ✅ event processed: ${event.type}`);
   return NextResponse.json({ received: true });
 }
