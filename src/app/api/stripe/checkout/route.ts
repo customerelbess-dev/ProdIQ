@@ -6,7 +6,7 @@ import { buildPriceToPlan } from "@/lib/stripe";
 function getStripe() {
   const key = process.env.STRIPE_SECRET_KEY?.trim();
   if (!key) return null;
-  return new Stripe(key, { apiVersion: "2025-03-31.basil" });
+  return new Stripe(key, { apiVersion: "2026-03-25.dahlia" });
 }
 
 function getServiceSupabase() {

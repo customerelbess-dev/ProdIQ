@@ -11,8 +11,11 @@ interface UsageInfo {
   blockResponse: NextResponse | null;
   /** True when this is a free user whose count should be incremented after success */
   isFreeUser: boolean;
-  /** Call this AFTER a successful analysis to record usage */
-  recordUsage: (userId: string, client: ReturnType<typeof createClient>) => Promise<void>;
+  /**
+   * Call AFTER a successful analysis to record usage.
+   * Closes over the Supabase client — no args needed.
+   */
+  recordUsage: () => Promise<void>;
 }
 
 /**
@@ -26,8 +29,8 @@ interface UsageInfo {
  * - Free user, ≥1 analysis:  blocked with HTTP 402.
  * - No token / DB error:     allowed (fail open — never block on infra error).
  */
-async function resolveUsage(req: NextRequest): Promise<UsageInfo & { userId: string; client: ReturnType<typeof createClient> | null }> {
-  const noop = { blockResponse: null, isFreeUser: false, userId: "", client: null, recordUsage: async () => {} };
+async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
+  const noop: UsageInfo = { blockResponse: null, isFreeUser: false, recordUsage: async () => {} };
 
   const token = req.headers.get("Authorization")?.replace("Bearer ", "").trim();
   if (!token) return noop;
@@ -55,7 +58,7 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo & { userId: str
       .maybeSingle();
 
     const plan = String(profile?.plan ?? "free");
-    if ((PAID_PLANS as readonly string[]).includes(plan)) return { ...noop, userId, client };
+    if ((PAID_PLANS as readonly string[]).includes(plan)) return noop; // paid → no limit
 
     // ── 2. Count real analyses rows — this is the ground truth ─────────────
     const { count, error: countErr } = await client
@@ -65,7 +68,7 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo & { userId: str
 
     if (countErr) {
       console.error("[analyze] count error — failing open:", countErr.message);
-      return { ...noop, userId, client }; // Fail open on DB error
+      return noop; // Fail open on DB error
     }
 
     const analysesCount = count ?? 0;
@@ -84,23 +87,20 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo & { userId: str
           { status: 402 },
         ),
         isFreeUser: true,
-        userId,
-        client,
         recordUsage: async () => {},
       };
     }
 
-    // ── 4. Within limit — provide a recordUsage closure ────────────────────
-    const recordUsage = async (uid: string, c: ReturnType<typeof createClient>) => {
+    // ── 4. Within limit — recordUsage closes over client ───────────────────
+    const recordUsage = async () => {
       try {
-        // Try the atomic RPC first (exists if migration was run)
-        await c.rpc("increment_analysis_count", { uid });
+        await client.rpc("increment_analysis_count", { uid: userId });
       } catch {
         // Silent — the analyses table row count is the real source of truth anyway
       }
     };
 
-    return { blockResponse: null, isFreeUser: true, userId, client, recordUsage };
+    return { blockResponse: null, isFreeUser: true, recordUsage };
   } catch (err) {
     console.error("[analyze] usage check exception — failing open:", err);
     return noop;
@@ -589,9 +589,7 @@ export async function POST(req: NextRequest) {
     if (product_name && search_query) {
       const report = await runDashboardAnalysis(product_name, search_query, asin || undefined);
       // Record usage for free users AFTER a successful analysis
-      if (usage.isFreeUser && usage.client) {
-        await usage.recordUsage(usage.userId, usage.client);
-      }
+      if (usage.isFreeUser) await usage.recordUsage();
       // Signal the frontend that this was the last free analysis
       const freeLimitReached = usage.isFreeUser;
       return NextResponse.json({ success: true, report, free_limit_reached: freeLimitReached });
@@ -633,9 +631,7 @@ export async function POST(req: NextRequest) {
     };
 
     const report = await runFullAnalysis(input);
-    if (usage.isFreeUser && usage.client) {
-      await usage.recordUsage(usage.userId, usage.client);
-    }
+    if (usage.isFreeUser) await usage.recordUsage();
     return NextResponse.json({ ...report, free_limit_reached: usage.isFreeUser });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Analysis failed";
