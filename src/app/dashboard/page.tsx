@@ -346,7 +346,7 @@ export default function DashboardPage() {
 
       // Set plan
       const fetchedPlan = (profileResult.data?.plan as string) || "free";
-      setUserPlan(fetchedPlan as "free" | "starter" | "pro" | "agency");
+      setUserPlan(fetchedPlan as "free" | "starter" | "pro" | "agency" | "enterprise");
 
       const { data, error } = analysesResult;
 
@@ -723,7 +723,51 @@ export default function DashboardPage() {
     }
   };
 
-  const handleNewProduct = () => {
+  /**
+   * Live free-plan limit check.
+   * Re-queries the analyses table so it can't be fooled by stale local state.
+   * Returns true if the user is OVER the limit (should be blocked).
+   * Shows the upgrade wall and returns true, or returns false if they can proceed.
+   */
+  const checkAndBlockIfOverLimit = async (): Promise<boolean> => {
+    const PAID = ["starter", "pro", "agency", "enterprise"];
+    // Fast path: already know they're paid
+    if (PAID.includes(userPlan)) return false;
+
+    // Re-query Supabase for the authoritative count
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user?.id) return false; // can't check → let server handle it
+
+      const [profileRes, countRes] = await Promise.all([
+        supabase.from("profiles").select("plan").eq("id", session.user.id).maybeSingle(),
+        supabase.from("analyses").select("id", { count: "exact", head: true }).eq("user_id", session.user.id),
+      ]);
+
+      const livePlan = String(profileRes.data?.plan ?? "free");
+      if (PAID.includes(livePlan)) {
+        setUserPlan(livePlan as "free" | "starter" | "pro" | "agency" | "enterprise");
+        return false;
+      }
+
+      const liveCount = countRes.count ?? 0;
+      console.log(`[limit] live check: plan=${livePlan} analyses=${liveCount}`);
+
+      if (liveCount >= 1) {
+        setShowUpgradeWall(true);
+        return true;
+      }
+    } catch (err) {
+      console.warn("[limit] check failed — allowing proceed:", err);
+    }
+    return false;
+  };
+
+  const handleNewProduct = async () => {
+    // Block free users who have already used their analysis BEFORE showing upload screen
+    const blocked = await checkAndBlockIfOverLimit();
+    if (blocked) return;
+
     setSelectedProduct(null);
     setCurrentStep(0);
     setActiveTab("market");
@@ -1035,12 +1079,13 @@ export default function DashboardPage() {
       const asin = String(idJson.asin ?? "").trim();
 
       // ── Client-side pre-check (instant UX feedback before hitting the API) ──
-      const isPaidPlan = ["starter", "pro", "agency", "enterprise"].includes(userPlan);
-      if (!isPaidPlan && analyses.length >= 1) {
+      // ── Live usage check BEFORE hitting the expensive API ──────────────────
+      // Re-query Supabase so this can't be bypassed by stale local state.
+      const blockedByLimit = await checkAndBlockIfOverLimit();
+      if (blockedByLimit) {
         clearResearchTickers();
         setBusy(false);
         setCurrentStep(1);
-        router.push("/pricing");
         return;
       }
 
@@ -1067,7 +1112,7 @@ export default function DashboardPage() {
         ANALYSIS_STORE.inFlight = false;
         setBusy(false);
         setCurrentStep(1);
-        router.push("/pricing");
+        setShowUpgradeWall(true);
         return;
       }
 
@@ -1352,7 +1397,7 @@ export default function DashboardPage() {
           </div>
           <button
             type="button"
-            onClick={handleNewProduct}
+            onClick={() => void handleNewProduct()}
             style={{
               background: "#6c47ff",
               border: "none",
@@ -1913,7 +1958,7 @@ export default function DashboardPage() {
             <div style={{ flex: 1, minWidth: 0 }}>{renderProductContextBanner()}</div>
             <button
               type="button"
-              onClick={handleNewProduct}
+              onClick={() => void handleNewProduct()}
               style={{
                 background: "#6c47ff",
                 border: "none",
@@ -2685,7 +2730,7 @@ export default function DashboardPage() {
           <div className="flex shrink-0 items-center gap-2">
             <button
               type="button"
-              onClick={handleNewProduct}
+              onClick={() => void handleNewProduct()}
               className="hidden sm:block"
               style={{
                 background: "#6c47ff",
