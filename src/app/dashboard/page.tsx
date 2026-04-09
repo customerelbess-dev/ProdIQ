@@ -344,8 +344,11 @@ export default function DashboardPage() {
           .maybeSingle(),
       ]);
 
-      // Set plan
+      // Set plan — log full profile result for debugging
       const fetchedPlan = (profileResult.data?.plan as string) || "free";
+      console.log("[dashboard] profile fetch result:", JSON.stringify(profileResult.data));
+      console.log(`[dashboard] profile error: ${profileResult.error?.message ?? "none"}`);
+      console.log(`[dashboard] resolved plan="${fetchedPlan}" for user=${session.user.id}`);
       setUserPlan(fetchedPlan as "free" | "starter" | "pro" | "agency" | "enterprise");
 
       const { data, error } = analysesResult;

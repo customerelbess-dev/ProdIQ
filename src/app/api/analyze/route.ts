@@ -51,17 +51,30 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
     const userId = user.id;
 
     // ── 1. Read plan from profiles ──────────────────────────────────────────
-    const { data: profile } = await client
+    const { data: profile, error: profileErr } = await client
       .from("profiles")
-      .select("plan")
+      .select("plan, analysis_count")
       .eq("id", userId)
       .maybeSingle();
+
+    if (profileErr) {
+      console.error(`[analyze] profiles read error for user=${userId}:`, profileErr.message);
+    }
 
     const plan = String(profile?.plan ?? "free");
     const planConfig = PLAN_LIMITS[plan] ?? PLAN_LIMITS["free"];
 
+    console.log(`[analyze] ── plan check ──`);
+    console.log(`[analyze]   user_id=${userId}`);
+    console.log(`[analyze]   profile row found=${profile !== null}`);
+    console.log(`[analyze]   plan from DB="${plan}" (raw="${profile?.plan ?? "(null)"}")`);
+    console.log(`[analyze]   planConfig=${JSON.stringify(planConfig)}`);
+
     // Unlimited plan — allow immediately
-    if (planConfig.limit === null) return noop;
+    if (planConfig.limit === null) {
+      console.log(`[analyze]   unlimited plan — allowing without count check`);
+      return noop;
+    }
 
     // ── 2. Count analyses for the relevant period ───────────────────────────
     let query = client

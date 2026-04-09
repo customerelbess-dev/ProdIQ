@@ -91,25 +91,53 @@ async function setUserPlan(
   priceId: string,
   context: string,
 ) {
-  console.log(`[webhook][${context}] writing plan=${plan} to profiles for user=${userId}`);
+  console.log(`[webhook][${context}] ── setUserPlan START ──`);
+  console.log(`[webhook][${context}]   userId=${userId}`);
+  console.log(`[webhook][${context}]   plan=${plan}`);
+  console.log(`[webhook][${context}]   customerId=${customerId}`);
+  console.log(`[webhook][${context}]   subscriptionId=${subscriptionId}`);
+  console.log(`[webhook][${context}]   priceId=${priceId}`);
 
-  const { error } = await supa.from("profiles").upsert(
-    {
-      id: userId,
-      plan,
-      stripe_customer_id: customerId,
-      stripe_subscription_id: subscriptionId,
-      stripe_price_id: priceId,
-      // Reset count so the user can immediately run analyses on their new plan
-      analysis_count: 0,
-    },
-    { onConflict: "id" },
-  );
+  const payload = {
+    id: userId,
+    plan,
+    stripe_customer_id: customerId,
+    stripe_subscription_id: subscriptionId,
+    stripe_price_id: priceId,
+    analysis_count: 0,
+  };
+  console.log(`[webhook][${context}]   upsert payload:`, JSON.stringify(payload));
+
+  const { data, error } = await supa
+    .from("profiles")
+    .upsert(payload, { onConflict: "id" })
+    .select()
+    .single();
 
   if (error) {
-    console.error(`[webhook][${context}] upsert FAILED:`, error.message, error.details);
+    console.error(`[webhook][${context}] ❌ upsert FAILED`);
+    console.error(`[webhook][${context}]   code:    ${error.code}`);
+    console.error(`[webhook][${context}]   message: ${error.message}`);
+    console.error(`[webhook][${context}]   details: ${error.details}`);
+    console.error(`[webhook][${context}]   hint:    ${error.hint}`);
+    // Re-throw so the outer handler sees the real error and logs it clearly
+    throw new Error(`profiles upsert failed for user=${userId}: ${error.message}`);
+  }
+
+  console.log(`[webhook][${context}] ✅ upsert SUCCESS`);
+  console.log(`[webhook][${context}]   returned row:`, JSON.stringify(data));
+
+  // Confirm by reading the row back
+  const { data: verify, error: verifyErr } = await supa
+    .from("profiles")
+    .select("id, plan, analysis_count, stripe_customer_id")
+    .eq("id", userId)
+    .single();
+
+  if (verifyErr) {
+    console.warn(`[webhook][${context}]   verify read failed: ${verifyErr.message}`);
   } else {
-    console.log(`[webhook][${context}] ✅ plan updated to "${plan}" for user=${userId}, analysis_count reset to 0`);
+    console.log(`[webhook][${context}]   verified row in DB:`, JSON.stringify(verify));
   }
 }
 
