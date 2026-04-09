@@ -80,7 +80,14 @@ function resolvePlanFromPriceId(priceId: string, context: string): string {
 }
 
 /**
- * Write plan + Stripe IDs to profiles and reset analysis_count to 0.
+ * Write plan to profiles using the service-role admin client.
+ *
+ * Strategy:
+ *  1. UPDATE profiles SET plan=X WHERE id=Y  (works even if extra columns are missing)
+ *  2. If 0 rows affected → user has no profile row yet → INSERT it
+ *  3. Separately update Stripe IDs (best-effort)
+ *  4. Separately reset analysis_count to 0 (best-effort — column may not exist yet)
+ *  5. Read the row back and log it so we can confirm the write in Vercel logs
  */
 async function setUserPlan(
   supa: ReturnType<typeof getServiceSupabase>,
@@ -92,52 +99,95 @@ async function setUserPlan(
   context: string,
 ) {
   console.log(`[webhook][${context}] ── setUserPlan START ──`);
-  console.log(`[webhook][${context}]   userId=${userId}`);
-  console.log(`[webhook][${context}]   plan=${plan}`);
-  console.log(`[webhook][${context}]   customerId=${customerId}`);
-  console.log(`[webhook][${context}]   subscriptionId=${subscriptionId}`);
-  console.log(`[webhook][${context}]   priceId=${priceId}`);
+  console.log(`[webhook][${context}]   userId   = ${userId}`);
+  console.log(`[webhook][${context}]   plan     = ${plan}`);
+  console.log(`[webhook][${context}]   customer = ${customerId}`);
+  console.log(`[webhook][${context}]   sub      = ${subscriptionId}`);
+  console.log(`[webhook][${context}]   priceId  = ${priceId}`);
 
-  const payload = {
-    id: userId,
-    plan,
-    stripe_customer_id: customerId,
-    stripe_subscription_id: subscriptionId,
-    stripe_price_id: priceId,
-    analysis_count: 0,
-  };
-  console.log(`[webhook][${context}]   upsert payload:`, JSON.stringify(payload));
+  // ── STEP 1: UPDATE plan (simplest possible write — only touches the plan column) ──
+  console.log(`[webhook][${context}]   STEP 1: UPDATE profiles SET plan='${plan}' WHERE id='${userId}'`);
 
-  const { data, error } = await supa
+  const { error: updateErr, count: updatedRows } = await supa
     .from("profiles")
-    .upsert(payload, { onConflict: "id" })
-    .select()
-    .single();
+    .update({ plan })
+    .eq("id", userId)
+    .select("id", { count: "exact", head: true });
 
-  if (error) {
-    console.error(`[webhook][${context}] ❌ upsert FAILED`);
-    console.error(`[webhook][${context}]   code:    ${error.code}`);
-    console.error(`[webhook][${context}]   message: ${error.message}`);
-    console.error(`[webhook][${context}]   details: ${error.details}`);
-    console.error(`[webhook][${context}]   hint:    ${error.hint}`);
-    // Re-throw so the outer handler sees the real error and logs it clearly
-    throw new Error(`profiles upsert failed for user=${userId}: ${error.message}`);
+  if (updateErr) {
+    console.error(`[webhook][${context}]   ❌ UPDATE failed: ${updateErr.message} (code=${updateErr.code})`);
+    console.error(`[webhook][${context}]   details: ${updateErr.details}`);
+    console.error(`[webhook][${context}]   hint: ${updateErr.hint}`);
+    throw new Error(`UPDATE profiles SET plan failed for user=${userId}: ${updateErr.message}`);
   }
 
-  console.log(`[webhook][${context}] ✅ upsert SUCCESS`);
-  console.log(`[webhook][${context}]   returned row:`, JSON.stringify(data));
+  const rowsAffected = updatedRows ?? 0;
+  console.log(`[webhook][${context}]   UPDATE rowsAffected=${rowsAffected}`);
 
-  // Confirm by reading the row back
+  // ── STEP 2: If 0 rows updated → no profile row exists → INSERT one ───────────
+  if (rowsAffected === 0) {
+    console.log(`[webhook][${context}]   STEP 2: No row found — inserting new profile row`);
+    const { error: insertErr } = await supa
+      .from("profiles")
+      .insert({ id: userId, plan });
+
+    if (insertErr) {
+      console.error(`[webhook][${context}]   ❌ INSERT failed: ${insertErr.message} (code=${insertErr.code})`);
+      throw new Error(`INSERT profiles failed for user=${userId}: ${insertErr.message}`);
+    }
+    console.log(`[webhook][${context}]   INSERT success — new profile row created with plan=${plan}`);
+  }
+
+  // ── STEP 3: Update Stripe IDs (best-effort, separate query) ──────────────────
+  if (customerId || subscriptionId || priceId) {
+    console.log(`[webhook][${context}]   STEP 3: updating Stripe IDs`);
+    const stripeUpdate: Record<string, string | null> = {};
+    if (customerId)    stripeUpdate.stripe_customer_id     = customerId;
+    if (subscriptionId) stripeUpdate.stripe_subscription_id = subscriptionId;
+    if (priceId)       stripeUpdate.stripe_price_id        = priceId;
+
+    const { error: stripeErr } = await supa
+      .from("profiles")
+      .update(stripeUpdate)
+      .eq("id", userId);
+
+    if (stripeErr) console.warn(`[webhook][${context}]   Stripe IDs update skipped: ${stripeErr.message}`);
+    else console.log(`[webhook][${context}]   Stripe IDs updated`);
+  }
+
+  // ── STEP 4: Reset analysis_count to 0 (best-effort — column may not exist) ───
+  console.log(`[webhook][${context}]   STEP 4: resetting analysis_count to 0`);
+  const { error: countErr } = await supa
+    .from("profiles")
+    .update({ analysis_count: 0 })
+    .eq("id", userId);
+
+  if (countErr) {
+    // Column may not exist — not a fatal error
+    console.warn(`[webhook][${context}]   analysis_count reset skipped: ${countErr.message}`);
+  } else {
+    console.log(`[webhook][${context}]   analysis_count reset to 0`);
+  }
+
+  // ── STEP 5: Read back and verify ─────────────────────────────────────────────
+  console.log(`[webhook][${context}]   STEP 5: reading row back to verify…`);
   const { data: verify, error: verifyErr } = await supa
     .from("profiles")
-    .select("id, plan, analysis_count, stripe_customer_id")
+    .select("id, plan, analysis_count, stripe_customer_id, stripe_price_id")
     .eq("id", userId)
-    .single();
+    .maybeSingle();
 
   if (verifyErr) {
     console.warn(`[webhook][${context}]   verify read failed: ${verifyErr.message}`);
+  } else if (!verify) {
+    console.error(`[webhook][${context}]   ❌ VERIFY: row still NOT found after write!`);
   } else {
-    console.log(`[webhook][${context}]   verified row in DB:`, JSON.stringify(verify));
+    console.log(`[webhook][${context}]   ✅ VERIFY row in DB:`, JSON.stringify(verify));
+    if (verify.plan !== plan) {
+      console.error(`[webhook][${context}]   ❌ plan mismatch! DB has "${verify.plan}" but expected "${plan}"`);
+    } else {
+      console.log(`[webhook][${context}]   ✅ plan confirmed as "${verify.plan}"`);
+    }
   }
 }
 
