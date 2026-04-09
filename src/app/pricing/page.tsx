@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, Suspense, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AnimatedBadge, AnimatedButton } from "@/components/LandingHeroClient";
 import { supabase } from "@/lib/supabase";
@@ -72,7 +72,7 @@ function SuccessBanner({ plan }: { plan: string }) {
   );
 }
 
-export default function PricingPage() {
+function PricingPageInner() {
   const router = useRouter();
   const params = useSearchParams();
   const [billing, setBilling]       = useState<Billing>("monthly");
@@ -362,5 +362,22 @@ export default function PricingPage() {
         </section>
       </div>
     </main>
+  );
+}
+
+export default function PricingPage() {
+  return (
+    <Suspense fallback={
+      <main className="min-h-screen bg-[#0a0a0a] pt-[88px] text-white">
+        <div className="flex h-[60vh] items-center justify-center">
+          <div className="flex flex-col items-center gap-4">
+            <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#6c47ff] border-t-transparent" />
+            <p className="text-sm text-[#555]">Loading pricing…</p>
+          </div>
+        </div>
+      </main>
+    }>
+      <PricingPageInner />
+    </Suspense>
   );
 }
