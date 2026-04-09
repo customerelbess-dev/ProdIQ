@@ -224,6 +224,10 @@ export default function DashboardPage() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [user, setUser] = useState<User | null>(null);
 
+  // Usage limiting
+  const [userPlan, setUserPlan] = useState<"free" | "starter" | "pro" | "agency">("free");
+  const [showUpgradeWall, setShowUpgradeWall] = useState(false);
+
   const [showSettings, setShowSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTabKey>("account");
 
@@ -325,11 +329,25 @@ export default function DashboardPage() {
       setAuthChecked(true);
       setReady(true);
 
-      const { data, error } = await supabase
-        .from("analyses")
-        .select("*")
-        .eq("user_id", session.user.id)
-        .order("created_at", { ascending: false });
+      // Fetch plan and analyses in parallel
+      const [analysesResult, profileResult] = await Promise.all([
+        supabase
+          .from("analyses")
+          .select("*")
+          .eq("user_id", session.user.id)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("profiles")
+          .select("plan")
+          .eq("id", session.user.id)
+          .maybeSingle(),
+      ]);
+
+      // Set plan
+      const fetchedPlan = (profileResult.data?.plan as string) || "free";
+      setUserPlan(fetchedPlan as "free" | "starter" | "pro" | "agency");
+
+      const { data, error } = analysesResult;
 
       if (error) {
         console.error("Fetch error:", error);
@@ -564,6 +582,8 @@ export default function DashboardPage() {
         body: JSON.stringify({
           competitors: comps,
           product_name: analysisReport?.product_name || selectedProduct.product_name,
+          // Pass the confirmed product image as visual reference for the gatekeeper
+          product_image: selectedProduct.product_image || "",
         }),
       });
       const data = (await res.json()) as {
@@ -772,13 +792,14 @@ export default function DashboardPage() {
           background: "#0c0c14",
           borderRadius: 14,
           border: "1px solid rgba(108,71,255,0.12)",
-          padding: "16px 20px",
+          padding: "14px 16px",
           display: "flex",
           alignItems: "center",
-          gap: 20,
+          gap: 12,
           cursor: "pointer",
           transition: "all 0.2s",
           marginBottom: 10,
+          flexWrap: "wrap",
         }}
         onMouseEnter={(e) => {
           e.currentTarget.style.borderColor = "#6c47ff";
@@ -983,15 +1004,44 @@ export default function DashboardPage() {
       if (!product_name) throw new Error("Could not identify product name");
 
       const asin = String(idJson.asin ?? "").trim();
+
+      // ── Client-side pre-check (instant UX feedback before hitting the API) ──
+      const isPaidPlan = ["starter", "pro", "agency", "enterprise"].includes(userPlan);
+      if (!isPaidPlan && analyses.length >= 1) {
+        clearResearchTickers();
+        setBusy(false);
+        setCurrentStep(1);
+        setShowUpgradeWall(true);
+        return;
+      }
+
+      // Pass auth token so server can enforce the limit server-side
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token ?? "";
+
       const anRes = await fetch("/api/analyze", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
         body: JSON.stringify({
           product_name,
           search_query,
           ...(asin ? { asin } : {}),
         }),
       });
+
+      // ── Handle server-side limit rejection ─────────────────────────────────
+      if (anRes.status === 402) {
+        clearResearchTickers();
+        ANALYSIS_STORE.inFlight = false;
+        setBusy(false);
+        setCurrentStep(1);
+        setShowUpgradeWall(true);
+        return;
+      }
+
       const anJson = (await anRes.json()) as Record<string, unknown>;
       const reportOk =
         anRes.ok &&
@@ -1210,24 +1260,23 @@ export default function DashboardPage() {
         style={{
           display: "flex",
           alignItems: "center",
-          gap: "12px",
+          gap: "10px",
           marginBottom: "24px",
-          padding: "10px 16px",
+          padding: "10px 14px",
           background: "rgba(108,71,255,0.06)",
           border: "1px solid rgba(108,71,255,0.15)",
           borderRadius: "10px",
+          flexWrap: "wrap",
         }}
       >
         <img
           src={selectedProduct.product_image || "/massager.jpg"}
           alt={selectedProduct.product_name}
-          style={{ width: "32px", height: "32px", borderRadius: "6px", objectFit: "cover", flexShrink: 0 }}
-          onError={(e) => {
-            e.currentTarget.src = "/massager.jpg";
-          }}
+          style={{ width: "28px", height: "28px", borderRadius: "6px", objectFit: "cover", flexShrink: 0 }}
+          onError={(e) => { e.currentTarget.src = "/massager.jpg"; }}
         />
-        <span style={{ color: "#888", fontSize: "13px" }}>
-          Viewing data for <strong style={{ color: "#a78bfa", fontWeight: 700 }}>{selectedProduct.product_name}</strong>
+        <span style={{ color: "#888", fontSize: "12px", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <strong style={{ color: "#a78bfa", fontWeight: 700 }}>{selectedProduct.product_name}</strong>
         </span>
         <button
           type="button"
@@ -1241,9 +1290,10 @@ export default function DashboardPage() {
             color: "#555",
             fontSize: "11px",
             cursor: "pointer",
+            flexShrink: 0,
           }}
         >
-          Change product
+          Change
         </button>
       </div>
     );
@@ -1483,7 +1533,7 @@ export default function DashboardPage() {
       return (
         <div>
           {renderProductContextBanner()}
-          <div style={{ display: "flex", gap: 8, marginBottom: 28 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 28, flexWrap: "wrap" }}>
             <SubTabButton active={launchSubTab === "execution"} onClick={() => setLaunchSubTab("execution")}>🗺 Execution Plan</SubTabButton>
             <SubTabButton active={launchSubTab === "campaigns"} onClick={() => setLaunchSubTab("campaigns")}>📣 Campaign Builder</SubTabButton>
           </div>
@@ -2210,7 +2260,7 @@ export default function DashboardPage() {
               );
             })()}
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" style={{ marginBottom: 16 }}>
               <button
                 type="button"
                 disabled={busy}
@@ -2361,56 +2411,243 @@ export default function DashboardPage() {
     );
   }
 
-  return (
-    <div style={{ minHeight: "100vh", background: BG, position: "relative", color: "#fff", paddingTop: 56, fontFamily: "system-ui, sans-serif" }}>
-      <AnimatedBackground />
-      <div style={{ position: "relative", zIndex: 1 }}>
-      <header
-        className="fixed left-0 right-0 top-0 z-[200] flex h-14 items-center justify-between gap-2 px-3 sm:px-5"
+  // ── Upgrade wall ────────────────────────────────────────────────────────────
+  // Shown when a free user has used their 1 free analysis.
+  // Cannot be dismissed — only upgrade or sign out.
+  if (showUpgradeWall) {
+    return (
+      <div
         style={{
-          background: "rgba(4,4,6,0.95)",
-          backdropFilter: "blur(20px)",
-          borderBottom: "1px solid rgba(108,71,255,0.1)",
           position: "fixed",
+          inset: 0,
+          zIndex: 9999,
+          background: "rgba(4,4,6,0.97)",
+          backdropFilter: "blur(24px)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "24px",
+          fontFamily: "system-ui, sans-serif",
         }}
       >
-        <Link href="/dashboard" className="flex shrink-0 items-center gap-2 no-underline">
-          <ProdIqLogoImg />
-          <span style={{ fontWeight: 800, fontSize: 17, color: "#fff" }}>
-            Prod<span style={{ color: PURPLE }}>IQ</span>
-          </span>
-        </Link>
-        {/* Centered tab bar — absolute so it doesn't push siblings */}
+        <style>{`
+          @keyframes uw-glow { 0%,100%{opacity:.4} 50%{opacity:.9} }
+          @keyframes uw-pulse { 0%,80%,100%{transform:scale(.8);opacity:.2} 40%{transform:scale(1);opacity:1} }
+        `}</style>
+
+        {/* Ambient glow */}
+        <div style={{ position: "absolute", top: "20%", left: "50%", transform: "translateX(-50%)", width: 600, height: 300, background: "radial-gradient(ellipse, rgba(108,71,255,0.18) 0%, transparent 70%)", pointerEvents: "none", animation: "uw-glow 4s ease-in-out infinite" }} />
+
         <div
           style={{
-            position: "absolute",
-            left: "50%",
-            transform: "translateX(-50%)",
-            display: "flex",
-            alignItems: "center",
-            gap: 2,
+            position: "relative",
             background: "#0c0c14",
-            borderRadius: 30,
-            padding: 4,
-            border: "1px solid #1a1a1a",
-            overflowX: "auto",
-            maxWidth: "calc(100vw - 260px)",
+            border: "1px solid rgba(108,71,255,0.45)",
+            borderRadius: 28,
+            padding: "52px 44px 44px",
+            maxWidth: 500,
+            width: "100%",
+            textAlign: "center",
+            boxShadow: "0 0 80px rgba(108,71,255,0.25), 0 40px 80px rgba(0,0,0,0.8)",
           }}
+        >
+          {/* Lock icon */}
+          <div style={{ fontSize: 52, marginBottom: 20, filter: "drop-shadow(0 0 20px rgba(108,71,255,0.6))" }}>🔒</div>
+
+          {/* Badge */}
+          <div style={{ background: "rgba(255,68,68,0.12)", border: "1px solid rgba(255,68,68,0.35)", borderRadius: 20, padding: "5px 18px", display: "inline-block", color: "#ff6b6b", fontSize: 11, fontWeight: 800, letterSpacing: "1.5px", marginBottom: 28 }}>
+            FREE ANALYSIS USED
+          </div>
+
+          <h2 style={{ color: "white", fontSize: "clamp(22px,5vw,30px)", fontWeight: 900, marginBottom: 14, lineHeight: 1.2 }}>
+            You&apos;ve used your free analysis
+          </h2>
+          <p style={{ color: "#777", fontSize: 15, lineHeight: 1.75, marginBottom: 36, maxWidth: 380, margin: "0 auto 36px" }}>
+            Upgrade to keep validating products, unlocking competitor intelligence, and building winning campaigns — without limits.
+          </p>
+
+          {/* Feature list */}
+          <div style={{ background: "#111", border: "1px solid #1a1a1a", borderRadius: 16, padding: "20px 24px", marginBottom: 32, textAlign: "left" }}>
+            {[
+              ["✦", "Unlimited product analyses"],
+              ["✦", "Full competitor ad library"],
+              ["✦", "Untapped angle discovery"],
+              ["✦", "AI-powered launch plans"],
+              ["✦", "Private supplier network"],
+            ].map(([icon, text]) => (
+              <div key={text} style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 0", borderBottom: "1px solid #1a1a1a" }}>
+                <span style={{ color: "#6c47ff", fontSize: 12, flexShrink: 0 }}>{icon}</span>
+                <span style={{ color: "#bbb", fontSize: 14 }}>{text}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Upgrade CTA */}
+          <a
+            href="/pricing"
+            style={{
+              display: "block",
+              background: "linear-gradient(135deg, #6c47ff, #9b7cff)",
+              border: "none",
+              borderRadius: 14,
+              padding: "16px 32px",
+              color: "white",
+              fontSize: 16,
+              fontWeight: 800,
+              textDecoration: "none",
+              marginBottom: 16,
+              boxShadow: "0 8px 32px rgba(108,71,255,0.45)",
+              transition: "opacity 0.2s",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.88"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}
+          >
+            Upgrade Now — View Plans →
+          </a>
+
+          {/* Sign out escape */}
+          <button
+            type="button"
+            onClick={() => void handleLogout()}
+            style={{ background: "transparent", border: "none", color: "#444", fontSize: 13, cursor: "pointer", padding: "8px 16px", transition: "color 0.2s" }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = "#888"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = "#444"; }}
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+    );
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
+  return (
+    <div style={{ minHeight: "100vh", background: BG, position: "relative", color: "#fff", paddingTop: 96, fontFamily: "system-ui, sans-serif" }} className="sm:pt-14">
+      <AnimatedBackground />
+      <div style={{ position: "relative", zIndex: 1 }}>
+      {/* Top bar: logo + actions */}
+      <header
+        className="fixed left-0 right-0 top-0 z-[200]"
+        style={{
+          background: "rgba(4,4,6,0.97)",
+          backdropFilter: "blur(20px)",
+          borderBottom: "1px solid rgba(108,71,255,0.1)",
+        }}
+      >
+        {/* Row 1: logo + buttons */}
+        <div className="flex h-14 items-center justify-between gap-2 px-3 sm:px-5">
+          <Link href="/dashboard" className="flex shrink-0 items-center gap-2 no-underline">
+            <ProdIqLogoImg />
+            <span style={{ fontWeight: 800, fontSize: 17, color: "#fff" }}>
+              Prod<span style={{ color: PURPLE }}>IQ</span>
+            </span>
+          </Link>
+          {/* Desktop: centered tab bar (hidden on mobile) */}
+          <div
+            className="absolute left-1/2 hidden -translate-x-1/2 sm:flex"
+            style={{
+              alignItems: "center",
+              gap: 2,
+              background: "#0c0c14",
+              borderRadius: 30,
+              padding: 4,
+              border: "1px solid #1a1a1a",
+              maxWidth: "calc(100vw - 260px)",
+            }}
+          >
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setActiveTab(t.id)}
+                onMouseEnter={(e) => { if (activeTab !== t.id) e.currentTarget.style.color = "#888"; }}
+                onMouseLeave={(e) => { if (activeTab !== t.id) e.currentTarget.style.color = "#555"; }}
+                style={{
+                  background: activeTab === t.id ? PURPLE : "transparent",
+                  border: "none",
+                  borderRadius: 26,
+                  padding: "7px 13px",
+                  color: activeTab === t.id ? "white" : "#555",
+                  fontSize: 12,
+                  fontWeight: activeTab === t.id ? 600 : 400,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  flexShrink: 0,
+                  transition: "all 0.2s",
+                }}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={handleNewProduct}
+              className="hidden sm:block"
+              style={{
+                background: "#6c47ff",
+                border: "none",
+                borderRadius: 8,
+                padding: "7px 14px",
+                color: "white",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                transition: "all 0.2s",
+                visibility: (activeTab === "launch" || activeTab === "discover" || activeTab === "advisor") ? "visible" : "hidden",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.85"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}
+            >
+              + New Product
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowSettings(true)}
+              style={{
+                background: "transparent",
+                border: "1px solid #1a1a1a",
+                borderRadius: 8,
+                padding: "7px 10px",
+                color: "#555",
+                cursor: "pointer",
+                fontSize: 16,
+                transition: "all 0.2s",
+                lineHeight: 1,
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = "#6c47ff";
+                e.currentTarget.style.color = "white";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = "#1a1a1a";
+                e.currentTarget.style.color = "#555";
+              }}
+              aria-label="Settings"
+            >
+              ⚙
+            </button>
+          </div>
+        </div>
+        {/* Row 2: mobile-only tab scroll bar */}
+        <div
+          className="flex items-center gap-1 overflow-x-auto px-3 pb-2 pt-0 sm:hidden"
+          style={{ scrollbarWidth: "none", WebkitOverflowScrolling: "touch" }}
         >
           {TABS.map((t) => (
             <button
               key={t.id}
               type="button"
               onClick={() => setActiveTab(t.id)}
-              onMouseEnter={(e) => { if (activeTab !== t.id) e.currentTarget.style.color = "#888"; }}
-              onMouseLeave={(e) => { if (activeTab !== t.id) e.currentTarget.style.color = "#555"; }}
               style={{
                 background: activeTab === t.id ? PURPLE : "transparent",
-                border: "none",
-                borderRadius: 26,
-                padding: "8px 16px",
+                border: `1px solid ${activeTab === t.id ? PURPLE : "#1a1a1a"}`,
+                borderRadius: 20,
+                padding: "5px 14px",
                 color: activeTab === t.id ? "white" : "#555",
-                fontSize: 13,
+                fontSize: 12,
                 fontWeight: activeTab === t.id ? 600 : 400,
                 cursor: "pointer",
                 whiteSpace: "nowrap",
@@ -2421,55 +2658,6 @@ export default function DashboardPage() {
               {t.label}
             </button>
           ))}
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <button
-            type="button"
-            onClick={handleNewProduct}
-            style={{
-              background: "#6c47ff",
-              border: "none",
-              borderRadius: 8,
-              padding: "7px 14px",
-              color: "white",
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: "pointer",
-              whiteSpace: "nowrap",
-              transition: "all 0.2s",
-              visibility: (activeTab === "launch" || activeTab === "discover" || activeTab === "advisor") ? "visible" : "hidden",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.85"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}
-          >
-            + New Product
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowSettings(true)}
-            style={{
-              background: "transparent",
-              border: "1px solid #1a1a1a",
-              borderRadius: 8,
-              padding: "7px 10px",
-              color: "#555",
-              cursor: "pointer",
-              fontSize: 16,
-              transition: "all 0.2s",
-              lineHeight: 1,
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.borderColor = "#6c47ff";
-              e.currentTarget.style.color = "white";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.borderColor = "#1a1a1a";
-              e.currentTarget.style.color = "#555";
-            }}
-            aria-label="Settings"
-          >
-            ⚙
-          </button>
         </div>
       </header>
 

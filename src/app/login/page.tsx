@@ -75,7 +75,7 @@ export default function LoginPage() {
           <ProdIqLogoMark size={28} />
           <p
             className="mt-10 text-white italic"
-            style={{ fontSize: 22, lineHeight: 1.5, maxWidth: 400 }}
+            style={{ fontSize: "clamp(16px, 4vw, 22px)", lineHeight: 1.5, maxWidth: 400 }}
           >
             Stop testing products that flop. Start winning with data.
           </p>
@@ -111,7 +111,7 @@ export default function LoginPage() {
           <div className="mb-8">
             <ProdIqBrandLogo variant="inline" />
           </div>
-          <h1 className="font-bold text-white" style={{ fontSize: 32, marginBottom: 8 }}>
+          <h1 className="font-bold text-white" style={{ fontSize: "clamp(22px, 5vw, 32px)", marginBottom: 8 }}>
             Welcome back.
           </h1>
           <p className="text-[#888888]" style={{ fontSize: 14, marginBottom: 40 }}>

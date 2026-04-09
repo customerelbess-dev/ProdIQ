@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 
 const ADS_MODEL = "claude-haiku-4-5-20251001";
+// Use a smarter model for the visual gatekeeper pass
+const VISION_MODEL = process.env.ANTHROPIC_IDENTIFY_MODEL ?? "claude-opus-4-5-20251101";
 
 function getAnthropic() {
   const key = process.env.ANTHROPIC_API_KEY?.trim();
@@ -63,48 +65,40 @@ async function apifyRun(actorId: string, input: Record<string, unknown>): Promis
 type CompetitorIn = { name?: string; website?: string; main_angle?: string; weakness?: string };
 type AdRow = Record<string, unknown>;
 
-async function verifyAdsBatch(
+/**
+ * PASS 1 — Fast text + category pre-filter (batched, cheap).
+ * Removes ads that are clearly off-topic based on text and non-product images.
+ */
+async function textPreFilter(
   ads: AdRow[],
   productName: string,
   anthropic: Anthropic,
 ): Promise<AdRow[]> {
   if (ads.length === 0) return [];
-
   const verified: AdRow[] = [];
-  const BATCH = 5;
+  const BATCH = 6;
 
   for (let i = 0; i < ads.length; i += BATCH) {
     const batch = ads.slice(i, i + BATCH);
-
-    type ContentBlock =
-      | { type: "text"; text: string }
-      | { type: "image"; source: { type: "url"; url: string } };
-
-    const content: ContentBlock[] = [
+    type CB = { type: "text"; text: string } | { type: "image"; source: { type: "url"; url: string } };
+    const content: CB[] = [
       {
         type: "text",
-        text: `You are a strict ad verification assistant. Your job is to decide if each ad is RELATED or UNRELATED to this product: "${productName}".
+        text: `You are a strict ad relevance filter. Product we are researching: "${productName}".
 
-An ad is RELATED if:
-- It promotes the same product type, a near-identical product, or a direct competitor
-- The image shows the product category or a similar product being advertised
+For each ad below, decide KEEP or REMOVE.
+KEEP if: the ad promotes this exact product, a direct competitor selling the same type of product, or is clearly in the same product category.
+REMOVE if: the ad is for a completely unrelated product/service, or the image shows something with no connection to "${productName}".
 
-An ad is UNRELATED if:
-- It is clearly about a completely different product or service
-- The image has nothing to do with the product category
-
-For each ad below, respond ONLY with a JSON array of exactly ${batch.length} strings, each "RELATED" or "UNRELATED" in the same order.
-Example: ["RELATED","UNRELATED","RELATED"]`,
+Reply ONLY a JSON array of exactly ${batch.length} strings: "KEEP" or "REMOVE".`,
       },
     ];
 
     batch.forEach((ad, idx) => {
       const imgUrl = String(ad.image ?? "").trim();
-      const headline = String(ad.headline ?? "").substring(0, 120);
-      const body = String(ad.body ?? "").substring(0, 80);
       content.push({
         type: "text",
-        text: `\nAd ${idx + 1} — Platform: ${String(ad.platform ?? "")}, Brand: "${String(ad.brand ?? "")}", Headline: "${headline}", Body: "${body}"`,
+        text: `\nAd ${idx + 1} — Brand: "${String(ad.brand ?? "")}", Headline: "${String(ad.headline ?? "").substring(0, 120)}", Body: "${String(ad.body ?? "").substring(0, 80)}"`,
       });
       if (imgUrl.startsWith("http")) {
         content.push({ type: "image", source: { type: "url", url: imgUrl } });
@@ -114,7 +108,7 @@ Example: ["RELATED","UNRELATED","RELATED"]`,
     try {
       const resp = await anthropic.messages.create({
         model: ADS_MODEL,
-        max_tokens: 120,
+        max_tokens: 100,
         messages: [{ role: "user", content }],
       });
       const text = resp.content[0]?.type === "text" ? resp.content[0].text : "";
@@ -122,21 +116,124 @@ Example: ["RELATED","UNRELATED","RELATED"]`,
       if (m) {
         const results = JSON.parse(m[0]) as string[];
         batch.forEach((ad, idx) => {
-          if ((results[idx] ?? "UNRELATED").toUpperCase().trim() === "RELATED") {
-            verified.push(ad);
-          }
+          if ((results[idx] ?? "KEEP").toUpperCase().trim() !== "REMOVE") verified.push(ad);
         });
       } else {
-        // Claude couldn't parse — keep the batch to avoid empty results
-        verified.push(...batch);
+        verified.push(...batch); // parse failed — keep (fail-open)
       }
     } catch {
-      // On error, keep the batch (fail-open)
-      verified.push(...batch);
+      verified.push(...batch); // error — keep (fail-open)
     }
   }
+  return verified;
+}
+
+/**
+ * PASS 2 — Visual gatekeeper (one-by-one, uses product reference image).
+ * Compares each ad image directly against the original product image.
+ * Only passes ads where Claude confirms the same product/packaging is shown.
+ * For ads without an image, they pass through unless text filter already removed them.
+ */
+async function visualGatekeeper(
+  ads: AdRow[],
+  productName: string,
+  productImageUrl: string,
+  anthropic: Anthropic,
+): Promise<AdRow[]> {
+  if (!productImageUrl.startsWith("http")) {
+    // No reference image available — fall back to text-only pass
+    return ads;
+  }
+
+  const verified: AdRow[] = [];
+
+  await Promise.all(
+    ads.map(async (ad) => {
+      const adImageUrl = String(ad.image ?? "").trim();
+
+      // Ads with no image pass through — can't visually reject what we can't see
+      if (!adImageUrl.startsWith("http")) {
+        verified.push(ad);
+        return;
+      }
+
+      try {
+        const resp = await anthropic.messages.create({
+          model: VISION_MODEL,
+          max_tokens: 80,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "image", source: { type: "url", url: productImageUrl } },
+                { type: "image", source: { type: "url", url: adImageUrl } },
+                {
+                  type: "text",
+                  text: `Image 1: the reference product ("${productName}").
+Image 2: an ad image.
+
+Does Image 2 show the SAME product or the same TYPE of product as Image 1?
+
+PASS if:
+- Image 2 shows the exact same product or packaging
+- Image 2 shows a competing product of the same type (e.g. same product category)
+- Image 2 is an ad creative for this product type
+
+FAIL if:
+- Image 2 shows a completely unrelated product or service
+- Image 2 is clearly for a different product category
+
+Reply ONLY JSON: {"verdict": "PASS"|"FAIL", "confidence": 0-100, "reason": "one sentence"}`,
+                },
+              ],
+            },
+          ],
+        });
+
+        const text = resp.content[0]?.type === "text" ? resp.content[0].text : "";
+        const parsed = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] ?? "{}") as {
+          verdict?: string;
+          confidence?: number;
+          reason?: string;
+        };
+
+        const passes = parsed.verdict !== "FAIL" || (parsed.confidence ?? 100) < 80;
+        if (passes) {
+          // Attach verification metadata to the ad
+          verified.push({ ...ad, _visual_verified: true, _visual_confidence: parsed.confidence ?? 90 });
+        } else {
+          console.log(`[ads] Visual reject (${parsed.confidence}%): "${String(ad.headline ?? "").substring(0, 60)}" — ${parsed.reason ?? ""}`);
+        }
+      } catch {
+        // On error, keep the ad (fail-open)
+        verified.push(ad);
+      }
+    }),
+  );
 
   return verified;
+}
+
+/**
+ * Full verification pipeline: text pre-filter → visual gatekeeper.
+ */
+async function verifyAdsFull(
+  ads: AdRow[],
+  productName: string,
+  productImageUrl: string,
+  anthropic: Anthropic,
+): Promise<AdRow[]> {
+  if (ads.length === 0) return [];
+
+  // Pass 1: cheap text + category filter
+  const afterText = await textPreFilter(ads, productName, anthropic);
+  if (afterText.length === 0) return ads.slice(0, 8); // fail-safe: if everything removed, keep first 8
+
+  // Pass 2: visual comparison against reference product image
+  const afterVisual = await visualGatekeeper(afterText, productName, productImageUrl, anthropic);
+
+  // Safety: never return zero ads
+  return afterVisual.length > 0 ? afterVisual : afterText.slice(0, 8);
 }
 
 export async function POST(req: NextRequest) {
@@ -144,9 +241,11 @@ export async function POST(req: NextRequest) {
     const body = (await req.json()) as {
       competitors?: CompetitorIn[];
       product_name?: string;
+      product_image?: string; // URL of the confirmed product image — used as visual reference
     };
     const competitors = body.competitors ?? [];
     const product_name = String(body.product_name ?? "").trim();
+    const product_image = String(body.product_image ?? "").trim();
     const allAds: AdRow[] = [];
 
     const competitorNames = competitors.slice(0, 5).map((c) => String(c.name ?? "").trim()).filter(Boolean);
@@ -442,15 +541,14 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const candidateAds = relevantAds.slice(0, 30);
+    const candidateAds = relevantAds.slice(0, 40);
 
-    // Triple-verify every ad with Claude vision before showing it
+    // Two-pass verification: text pre-filter → visual gatekeeper
     const anthropic = getAnthropic();
     let workingAds: AdRow[];
     if (anthropic && candidateAds.length > 0) {
-      workingAds = await verifyAdsBatch(candidateAds, product_name, anthropic);
-      // If verification removes everything, fall back gracefully
-      if (workingAds.length === 0) workingAds = candidateAds.slice(0, 10);
+      console.log(`[ads] Running two-pass verification on ${candidateAds.length} candidates (product_image: ${product_image ? "yes" : "no"})`);
+      workingAds = await verifyAdsFull(candidateAds, product_name, product_image, anthropic);
     } else {
       workingAds = candidateAds;
     }

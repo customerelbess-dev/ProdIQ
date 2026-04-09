@@ -575,11 +575,11 @@ function FeatureTabAngles() {
         </div>
       </div>
 
-      {/* Mind map */}
-      <div style={{ padding: "12px 20px 8px", textAlign: "center" }}>
+      {/* Mind map — hidden on very small screens */}
+      <div className="hidden sm:block" style={{ padding: "12px 20px 8px", textAlign: "center" }}>
         <div style={{ color: "#555", fontSize: 12 }}>Click any angle to get the full strategy</div>
       </div>
-      <div style={{ position: "relative", minHeight: 480, margin: "0 20px 12px" }}>
+      <div className="hidden sm:block" style={{ position: "relative", minHeight: 480, margin: "0 20px 12px" }}>
         {/* SVG connecting lines */}
         <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
           {/* Left lines (saturated) */}
@@ -660,8 +660,8 @@ function FeatureTabAngles() {
         </div>
       </div>
 
-      {/* Untapped angle cards below */}
-      <div style={{ padding: "0 20px 16px", borderTop: "1px solid #1a1a1a", paddingTop: 16 }}>
+      {/* Untapped angle cards — always visible, extra prominent on mobile */}
+      <div className="sm:border-t sm:border-[#1a1a1a]" style={{ padding: "0 20px 16px", paddingTop: 16 }}>
         <div style={{ color: "#555", fontSize: 10, fontWeight: 700, letterSpacing: 1, marginBottom: 10 }}>✨ UNTAPPED ANGLES — Click to unlock full strategy</div>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
           {DEMO_ANGLES.untapped.map((a, i) => (
@@ -956,7 +956,7 @@ function FeatureTabCompetitor() {
           </span>
         </div>
 
-        <div className="grid grid-cols-2 lg:grid-cols-4" style={{ padding: "16px 20px", gap: 12 }}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4" style={{ padding: "16px 20px", gap: 12 }}>
           {competitorMockAds.map((ad, i) => (
             <div
               key={i}
@@ -1419,76 +1419,46 @@ export default function HomePage() {
 
       {/* SECTION 2 — HERO */}
       <style>{`
-        /* Border light travels clockwise along left diamond (320×320, perimeter=1280) */
+        /* Single purple light — left diamond clockwise (perimeter 1280) */
         @keyframes borderDotLeft {
-          0%   { stroke-dashoffset: 1280; }
-          18%  { stroke-dashoffset: 1065; }
-          36%  { stroke-dashoffset: 860; }
-          50%  { stroke-dashoffset: 810; }
-          62%  { stroke-dashoffset: 795; }
-          78%  { stroke-dashoffset: 395; }
-          90%  { stroke-dashoffset: 115; }
-          100% { stroke-dashoffset: 0; }
+          from { stroke-dashoffset: 1280; }
+          to   { stroke-dashoffset: 0; }
         }
-        /* Border light travels counter-clockwise along right diamond (280×280, perimeter=1120) */
+        /* Single purple light — right diamond counter-clockwise (perimeter 1120) */
         @keyframes borderDotRight {
-          0%   { stroke-dashoffset: 0; }
-          12%  { stroke-dashoffset: -175; }
-          28%  { stroke-dashoffset: -345; }
-          46%  { stroke-dashoffset: -415; }
-          58%  { stroke-dashoffset: -425; }
-          76%  { stroke-dashoffset: -855; }
-          90%  { stroke-dashoffset: -1020; }
-          100% { stroke-dashoffset: -1120; }
+          from { stroke-dashoffset: 0; }
+          to   { stroke-dashoffset: -1120; }
         }
       `}</style>
       <section className="relative overflow-hidden px-4 pb-[60px] pt-[120px] sm:pb-[100px] sm:pt-[160px]" style={HERO_ATMOSPHERE}>
-        {/* Left diamond — light traces the border */}
+        {/* Left diamond — single purple light */}
         <div
           className="pointer-events-none absolute left-[-15%] top-[20%] h-[320px] w-[320px] rotate-45 opacity-80 sm:left-[-8%]"
           style={{ background: "rgba(108,71,255,0.08)", border: "1px solid rgba(108,71,255,0.18)", position: "absolute" }}
           aria-hidden
         >
           <svg viewBox="0 0 320 320" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", overflow: "visible" }} aria-hidden>
-            {/* Particle 1 — outer glow */}
             <rect x="0" y="0" width="320" height="320" fill="none"
-              stroke="rgba(108,71,255,0.28)" strokeWidth="5" strokeDasharray="72 1208" strokeLinecap="round"
-              style={{ animation: "borderDotLeft 9s linear infinite" }} />
-            {/* Particle 1 — bright core */}
+              stroke="rgba(108,71,255,0.35)" strokeWidth="6" strokeDasharray="40 1240" strokeLinecap="round"
+              style={{ animation: "borderDotLeft 8s linear infinite" }} />
             <rect x="0" y="0" width="320" height="320" fill="none"
-              stroke="rgba(196,181,253,0.9)" strokeWidth="1.5" strokeDasharray="26 1254" strokeLinecap="round"
-              style={{ animation: "borderDotLeft 9s linear infinite" }} />
-            {/* Particle 2 — trailing ~⅓ behind */}
-            <rect x="0" y="0" width="320" height="320" fill="none"
-              stroke="rgba(108,71,255,0.18)" strokeWidth="4" strokeDasharray="55 1225" strokeLinecap="round"
-              style={{ animation: "borderDotLeft 9s linear infinite", animationDelay: "-3.1s" }} />
-            <rect x="0" y="0" width="320" height="320" fill="none"
-              stroke="rgba(167,139,250,0.75)" strokeWidth="1.5" strokeDasharray="20 1260" strokeLinecap="round"
-              style={{ animation: "borderDotLeft 9s linear infinite", animationDelay: "-3.1s" }} />
+              stroke="rgba(140,100,255,0.95)" strokeWidth="2" strokeDasharray="18 1262" strokeLinecap="round"
+              style={{ animation: "borderDotLeft 8s linear infinite" }} />
           </svg>
         </div>
-        {/* Right diamond — light traces the border (counter-clockwise, slower) */}
+        {/* Right diamond — single purple light (counter-clockwise, slightly slower) */}
         <div
           className="pointer-events-none absolute right-[-18%] top-[35%] h-[280px] w-[280px] rotate-45 opacity-80 sm:right-[-10%]"
           style={{ background: "rgba(108,71,255,0.08)", border: "1px solid rgba(108,71,255,0.18)", position: "absolute" }}
           aria-hidden
         >
           <svg viewBox="0 0 280 280" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", overflow: "visible" }} aria-hidden>
-            {/* Particle — outer glow */}
             <rect x="0" y="0" width="280" height="280" fill="none"
-              stroke="rgba(108,71,255,0.3)" strokeWidth="5" strokeDasharray="64 1056" strokeLinecap="round"
-              style={{ animation: "borderDotRight 13s linear infinite" }} />
-            {/* Particle — bright core */}
+              stroke="rgba(108,71,255,0.35)" strokeWidth="6" strokeDasharray="36 1084" strokeLinecap="round"
+              style={{ animation: "borderDotRight 11s linear infinite" }} />
             <rect x="0" y="0" width="280" height="280" fill="none"
-              stroke="rgba(196,181,253,0.9)" strokeWidth="1.5" strokeDasharray="22 1098" strokeLinecap="round"
-              style={{ animation: "borderDotRight 13s linear infinite" }} />
-            {/* Second particle — ~half-way behind */}
-            <rect x="0" y="0" width="280" height="280" fill="none"
-              stroke="rgba(108,71,255,0.16)" strokeWidth="3.5" strokeDasharray="45 1075" strokeLinecap="round"
-              style={{ animation: "borderDotRight 13s linear infinite", animationDelay: "-5.8s" }} />
-            <rect x="0" y="0" width="280" height="280" fill="none"
-              stroke="rgba(167,139,250,0.7)" strokeWidth="1.5" strokeDasharray="16 1104" strokeLinecap="round"
-              style={{ animation: "borderDotRight 13s linear infinite", animationDelay: "-5.8s" }} />
+              stroke="rgba(140,100,255,0.95)" strokeWidth="2" strokeDasharray="16 1104" strokeLinecap="round"
+              style={{ animation: "borderDotRight 11s linear infinite" }} />
           </svg>
         </div>
         <div className="relative z-[1] mx-auto flex max-w-[900px] flex-col items-center text-center">
@@ -1966,16 +1936,7 @@ export default function HomePage() {
             <div style={{ color: "#555", fontSize: "13px", marginTop: "4px" }}>Countries Reached</div>
           </div>
         </div>
-        <div
-          className="mx-auto w-full"
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(3, 1fr)",
-            gap: "20px",
-            maxWidth: "1100px",
-            margin: "0 auto",
-          }}
-        >
+        <div className="mx-auto grid w-full grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3" style={{ maxWidth: "1100px" }}>
           {reviewers.map((reviewer) => (
             <div
               key={reviewer.name + reviewer.date}

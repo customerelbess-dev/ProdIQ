@@ -1,13 +1,80 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import { createClient } from "@supabase/supabase-js";
 import { runFullAnalysis, type AnalyzeInput } from "@/lib/analyze-pipeline";
+
+const FREE_ANALYSIS_LIMIT = 1;
+const PAID_PLANS = ["starter", "pro", "agency", "enterprise"] as const;
+
+/**
+ * Server-side usage limit check.
+ * Validates the user's JWT, reads their plan from profiles, and counts
+ * existing analyses. Returns an error response if they are over-limit,
+ * or null if the request is allowed to proceed.
+ */
+async function checkUsageLimit(req: NextRequest): Promise<NextResponse | null> {
+  const token = req.headers.get("Authorization")?.replace("Bearer ", "").trim();
+  if (!token) return null; // No token — allow (unauthenticated edge case)
+
+  const supabaseUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL ?? "").trim();
+  const supabaseKey = (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "").trim();
+  if (!supabaseUrl || !supabaseKey || supabaseUrl.includes("placeholder")) return null;
+
+  try {
+    const client = createClient(supabaseUrl, supabaseKey, {
+      global: { headers: { Authorization: `Bearer ${token}` } },
+      auth: { persistSession: false },
+    });
+
+    const { data: { user }, error: userErr } = await client.auth.getUser();
+    if (userErr || !user?.id) return null;
+
+    // Fetch the user's plan
+    const { data: profile } = await client
+      .from("profiles")
+      .select("plan")
+      .eq("id", user.id)
+      .maybeSingle();
+
+    const plan = String(profile?.plan ?? "free");
+    if ((PAID_PLANS as readonly string[]).includes(plan)) return null; // Paid — no limit
+
+    // Count existing analyses for this user
+    const { count, error: countErr } = await client
+      .from("analyses")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id);
+
+    if (countErr) {
+      console.error("[analyze] limit count error:", countErr.message);
+      return null; // Fail open — don't block on DB error
+    }
+
+    if ((count ?? 0) >= FREE_ANALYSIS_LIMIT) {
+      return NextResponse.json(
+        {
+          error: "LIMIT_REACHED",
+          message: `You've used your ${FREE_ANALYSIS_LIMIT} free analysis. Upgrade to continue.`,
+          analyses_used: count,
+          limit: FREE_ANALYSIS_LIMIT,
+        },
+        { status: 402 },
+      );
+    }
+  } catch (err) {
+    console.error("[analyze] limit check exception:", err);
+    // Fail open — never block on unexpected error
+  }
+
+  return null;
+}
 
 export const maxDuration = 120;
 
 const ANALYZE_MODEL = process.env.ANTHROPIC_ANALYZE_MODEL ?? "claude-opus-4-5-20251101";
 
 function getAnthropic() {
-  const key = process.env.ANTHROPIC_API_KEY;
+  const key = process.env.ANTHROPIC_API_KEY?.trim();
   if (!key) return null;
   return new Anthropic({ apiKey: key });
 }
@@ -468,6 +535,11 @@ Return ONLY this JSON (no markdown):
 
 export async function POST(req: NextRequest) {
   console.log("Analyze API:", new Date().toISOString());
+
+  // ── Server-side usage limit enforcement ──────────────────────────────────
+  const limitBlock = await checkUsageLimit(req);
+  if (limitBlock) return limitBlock;
+  // ─────────────────────────────────────────────────────────────────────────
 
   try {
     const body = (await req.json()) as Record<string, unknown>;

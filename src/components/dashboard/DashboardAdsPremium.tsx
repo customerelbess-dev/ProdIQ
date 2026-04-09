@@ -52,7 +52,6 @@ function buildAdsFromReport(report: Record<string, unknown>, productName: string
 const SUB_TABS = [
   { label: "Ad Library", icon: "◎" },
   { label: "Their Angles", icon: "🎯" },
-  { label: "My Generations", icon: "✦" },
   { label: "Weaknesses", icon: "⚠" },
 ] as const;
 
@@ -230,7 +229,7 @@ export function DashboardAdsPremium({ report, productName }: Props) {
         <div style={{ padding: "12px 20px 8px", borderBottom: "1px solid #111" }}>
           <span style={{ color: "#444", fontSize: 11, fontWeight: 600 }}>
             Competitor ads — {productName}
-            {adsSub === 1 ? " · angle lens" : adsSub === 2 ? " · generations" : adsSub === 3 ? " · weaknesses" : ""}
+            {adsSub === 1 ? " · angle lens" : adsSub === 2 ? " · weaknesses" : ""}
           </span>
         </div>
 

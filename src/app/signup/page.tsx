@@ -183,7 +183,7 @@ export default function SignupPage() {
           <div className="mb-2">
             <ProdIqBrandLogo variant="inline" />
           </div>
-          <h1 className="mt-8 font-bold text-white" style={{ fontSize: 32, marginBottom: 8 }}>
+          <h1 className="mt-8 font-bold text-white" style={{ fontSize: "clamp(22px, 5vw, 32px)", marginBottom: 8 }}>
             Create your account.
           </h1>
           <p className="text-[#888888]" style={{ fontSize: 14, marginBottom: 32 }}>
@@ -392,7 +392,7 @@ export default function SignupPage() {
         </div>
         <div className="relative z-[1] flex max-w-[400px] flex-col items-center px-6 py-12 text-center">
           <ProdIqLogoMark size={28} />
-          <p className="mt-10 text-white italic" style={{ fontSize: 22, lineHeight: 1.5, maxWidth: 400 }}>
+          <p className="mt-10 text-white italic" style={{ fontSize: "clamp(16px, 4vw, 22px)", lineHeight: 1.5, maxWidth: 400 }}>
             Stop testing products that flop. Start winning with data.
           </p>
           <div className="mt-10 flex flex-wrap justify-center gap-2">

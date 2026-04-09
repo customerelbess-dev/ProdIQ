@@ -215,7 +215,7 @@ function normalizeReport(raw: unknown): ProdIQReport {
 }
 
 export async function analyzeProductWithClaude(input: AnalyzeInput): Promise<ProdIQReport> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY is not configured");
   }
