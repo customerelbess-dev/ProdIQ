@@ -1094,6 +1094,15 @@ export default function DashboardPage() {
 
   async function handleConfirmProduct() {
     if (!identifiedProduct) return;
+
+    // ── Plan limit check — runs FIRST, before any loading state or UI changes ──
+    // This is the ONLY client-side usage gate in the analysis flow.
+    // If the user is at or over their limit, show the upgrade wall immediately
+    // with zero loading animation — no spinner, no tickers, no state flicker.
+    const blockedByLimit = await checkAndBlockIfOverLimit();
+    if (blockedByLimit) return; // wall already shown inside checkAndBlockIfOverLimit
+    // ──────────────────────────────────────────────────────────────────────────
+
     setErrorMsg(null);
     setBusy(true);
     setCurrentStep(2);
@@ -1129,18 +1138,8 @@ export default function DashboardPage() {
 
       const asin = String(idJson.asin ?? "").trim();
 
-      // ── Client-side pre-check (instant UX feedback before hitting the API) ──
-      // ── Live usage check BEFORE hitting the expensive API ──────────────────
-      // Re-query Supabase so this can't be bypassed by stale local state.
-      const blockedByLimit = await checkAndBlockIfOverLimit();
-      if (blockedByLimit) {
-        clearResearchTickers();
-        setBusy(false);
-        setCurrentStep(1);
-        return;
-      }
-
-      // Pass auth token so server can enforce the limit server-side
+      // Pass auth token so server can enforce the limit as a safety net
+      // (handles race conditions where client-side check passed but server disagrees)
       const { data: sessionData } = await supabase.auth.getSession();
       const accessToken = sessionData.session?.access_token ?? "";
 
@@ -1157,7 +1156,10 @@ export default function DashboardPage() {
         }),
       });
 
-      // ── Handle server-side limit rejection ─────────────────────────────────
+      // ── Server-side safety net: API rejected the request (race condition) ──
+      // This only fires when the client-side check passed but the server's own
+      // count disagreed (e.g. two tabs open, or DB read was stale client-side).
+      // The analysis never ran — count was NOT incremented — so the wall is correct.
       if (anRes.status === 402) {
         clearResearchTickers();
         ANALYSIS_STORE.inFlight = false;
