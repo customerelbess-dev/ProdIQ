@@ -132,7 +132,7 @@ async function setUserPlan(
     .from("profiles")
     .update({ plan, analysis_count: 0, analysis_limit: analysisLimit })
     .eq("id", userId)
-    .select("id", { count: "exact", head: true });
+    .select("id");
 
   if (updateErr) {
     console.error(`[webhook][${context}]   ❌ UPDATE failed: ${updateErr.message} (code=${updateErr.code})`);

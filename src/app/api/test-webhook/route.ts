@@ -119,7 +119,7 @@ async function simulateWebhook(userId: string, plan: Plan) {
     .from("profiles")
     .update({ plan, analysis_count: 0, analysis_limit: analysisLimit })
     .eq("id", userId)
-    .select("id", { count: "exact", head: true });
+    .select("id");
 
   if (updateErr) {
     log("error", "step1", `UPDATE failed: ${updateErr.message}`, {

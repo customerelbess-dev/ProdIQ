@@ -807,7 +807,7 @@ export default function DashboardPage() {
         todayStart.setHours(0, 0, 0, 0);
         const { count: dailyCount } = await supabase
           .from("analyses")
-          .select("id", { count: "exact", head: true })
+          .select("id")
           .eq("user_id", userId)
           .gte("created_at", todayStart.toISOString());
         used = dailyCount ?? 0;
