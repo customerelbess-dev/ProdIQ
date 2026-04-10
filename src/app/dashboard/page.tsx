@@ -225,7 +225,21 @@ export default function DashboardPage() {
   const [initialLoading, setInitialLoading] = useState(true);
   const [user, setUser] = useState<User | null>(null);
 
-  // Usage limiting — values come from profiles.plan / analysis_count / analysis_limit
+  // ── Usage limiting ────────────────────────────────────────────────────────
+  // Values come from profiles.plan / analysis_count / analysis_limit in Supabase.
+  //
+  // showUpgradeWall (full-screen modal) MUST only be set to true in:
+  //   1. checkAndBlockIfOverLimit()  — user clicked "New Product" or "Analyze"
+  //                                    and is already at/over their limit
+  //   2. 402 response handler        — server rejected a just-started analysis
+  //                                    (race-condition safety net only)
+  //
+  // It MUST NOT fire:
+  //   - Automatically when results are displayed
+  //   - When the LockedFeatureOverlay "Upgrade to see this" button is clicked
+  //     (those navigate to /pricing instead)
+  //   - At any point during or after an analysis that has already started
+  // ─────────────────────────────────────────────────────────────────────────
   const [userPlan, setUserPlan] = useState<"free" | "starter" | "pro" | "agency" | "enterprise">("free");
   const [analysisCount, setAnalysisCount] = useState<number>(0);
   const [analysisLimit, setAnalysisLimit] = useState<number | null>(1); // null = unlimited
@@ -1645,7 +1659,7 @@ export default function DashboardPage() {
             <LockedFeatureOverlay
               locked={true}
               featureName="Private Supplier Network"
-              onUpgrade={() => setShowUpgradeWall(true)}
+              onUpgrade={() => router.push("/pricing")}
             >
               {/* Placeholder preview so blur has something to show */}
               <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -1991,7 +2005,7 @@ export default function DashboardPage() {
             <LockedFeatureOverlay
               locked={userPlan === "free"}
               featureName="Competitor Intelligence"
-              onUpgrade={() => setShowUpgradeWall(true)}
+              onUpgrade={() => router.push("/pricing")}
             >
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {compsForMarket.map((comp, i) => {
@@ -2089,7 +2103,7 @@ export default function DashboardPage() {
             <LockedFeatureOverlay
               locked={userPlan === "free"}
               featureName="Competitor Ads Intelligence"
-              onUpgrade={() => setShowUpgradeWall(true)}
+              onUpgrade={() => router.push("/pricing")}
             >
               <DashboardAdsIntelligence
                 report={adsReport2}
