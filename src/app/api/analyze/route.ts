@@ -152,6 +152,7 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
           { status: 402 },
         ),
         shouldRecord: false,
+        isLastAllowed: false,
         recordUsage: async () => {},
       };
     }
