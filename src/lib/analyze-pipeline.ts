@@ -283,19 +283,19 @@ Read the real reviews and Reddit discussions provided. Extract:
 - Frustrations with existing products (these become your winning angles)
 
 WINNING AD ANGLES — CRITICAL:
-You MUST generate EXACTLY 5 SATURATED angles, EXACTLY 5 EMERGING angles, and EXACTLY 5 UNTAPPED angles — 15 angles total minimum.
-NEVER return fewer than 5 per category.
+Generate angles across 3 types. Vary the count naturally based on what the data supports:
+- SATURATED: 4–5 angles — generic/mainstream claims the top brands all use ("best quality", "professional grade", price-focused, feature-focused)
+- EMERGING: 3–4 angles — growing pain points from Reddit/reviews used by 1-2 competitors but not mainstream yet
+- UNTAPPED: 3–4 angles — deep emotional pain nobody addresses in ads; hyper-specific life situations, transformation stories, fear-based hooks that make someone say "this was made for ME"
 
-SATURATED angles: generic/mainstream claims the top brands all use ("best quality", "professional grade", price-focused, feature-focused).
-EMERGING angles: growing pain points from Reddit/reviews used by 1-2 competitors but not mainstream yet.
-UNTAPPED angles: deep emotional pain nobody is addressing in ads — hyper-specific life situations, transformation stories, fear-based hooks that make someone say "this was made for ME".
+Total must be at least 9 angles. Every category must have at least 3. Each angle must be distinct.
 
 success_rate ranges:
 - SATURATED: 8-35
 - EMERGING: 52-74
 - UNTAPPED: 72-94
 
-ANGLES REQUIREMENT (non-negotiable): Your "angles" array MUST have exactly 5 SATURATED + 5 EMERGING + 5 UNTAPPED = 15 entries. Count before responding and add more if short.
+ANGLES REQUIREMENT: "angles" array — at least 9 total (roughly 4–5 SATURATED, 3–4 EMERGING, 3–4 UNTAPPED). Vary naturally. Min 3 per category. No near-duplicates.
 
 Return ONLY valid JSON (no comments, no markdown) with this structure:
 {

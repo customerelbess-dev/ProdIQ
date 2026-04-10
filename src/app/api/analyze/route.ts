@@ -512,9 +512,12 @@ main_angle MUST come from their actual product title or description in the searc
 For each competitor estimate monthly_revenue using evidence from the data when possible.
 
 ANGLES RULES — CRITICAL:
-You MUST generate EXACTLY 5 SATURATED angles, EXACTLY 5 EMERGING angles, and EXACTLY 5 UNTAPPED angles — 15 angles total minimum.
-NEVER return fewer than 5 per category. Every category MUST have at least 5 distinct angles.
-NEVER return 0 saturated angles — there are ALWAYS saturated angles for any product.
+Vary the number of angles naturally based on the data. Target ranges:
+- SATURATED: 4–5 angles (markets always have multiple saturated angles)
+- EMERGING: 3–4 angles (depends on how many new trends are visible in the data)
+- UNTAPPED: 3–4 angles (quality over quantity — these are your most valuable angles)
+Total must always be at least 9 angles across all 3 categories.
+Never return fewer than 3 per category. Never return 0 for any category.
 
 Think hard. Dig deep into the data. Use every pain point, every review phrase, every Reddit thread to generate unique angles.
 
@@ -564,7 +567,7 @@ Return ONLY valid compact JSON. No markdown.`;
 
 ${researchContext}
 
-ANGLES REQUIREMENT (non-negotiable): Your response MUST include exactly 5 SATURATED angles, 5 EMERGING angles, and 5 UNTAPPED angles — 15 angles total in the "angles" array. Each angle must be distinct. Before you finish, count your angles per type and add more if needed.
+ANGLES REQUIREMENT: Your "angles" array must have at least 9 entries total — roughly 4–5 SATURATED, 3–4 EMERGING, 3–4 UNTAPPED. Vary the count naturally based on the data. Every category must have at least 3. Each angle must be distinct — no near-duplicates.
 
 Return ONLY this JSON (no markdown, no comments):
 {
