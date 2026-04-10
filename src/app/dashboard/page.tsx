@@ -694,15 +694,21 @@ export default function DashboardPage() {
         }
       }
 
-      // Fetch from API
+      // Fetch from API — include auth token so server can verify plan
       setLoadingCompAds(name);
       try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        const accessToken = sessionData.session?.access_token ?? "";
         const res = await fetch("/api/ads", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+          },
           body: JSON.stringify({
             competitors: [competitor],
             product_name: String(analysisReport?.product_name ?? selectedProduct?.product_name ?? ""),
+            product_image: String(selectedProduct?.product_image ?? ""),
           }),
         });
         const data = (await res.json()) as { ads?: Record<string, unknown>[] };
@@ -768,51 +774,63 @@ export default function DashboardPage() {
    * Shows the upgrade wall and returns true, or returns false if they can proceed.
    */
   const checkAndBlockIfOverLimit = async (): Promise<boolean> => {
-    // Re-query Supabase for the authoritative plan + analysis_limit + analysis_count
+    // Re-query Supabase for authoritative plan + limit, then count analyses rows directly.
+    // We count the analyses TABLE instead of relying on analysis_count column because:
+    //   1. analysis_count may never have been initialised for existing users
+    //   2. The increment RPC may fail silently — making count stale
+    // Counting real rows is always accurate and cannot be bypassed.
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.user?.id) return false; // can't check → let server enforce it
+      if (!session?.user?.id) return false; // can't check → let server enforce
 
       const userId = session.user.id;
 
       const { data: profileData } = await supabase
         .from("profiles")
-        .select("plan, analysis_count, analysis_limit")
+        .select("plan, analysis_limit")
         .eq("id", userId)
         .maybeSingle();
 
-      const livePlan  = String(profileData?.plan ?? "free");
-      const liveLimit: number | null =
-        profileData?.analysis_limit == null ? null : Number(profileData.analysis_limit);
-      const liveCount = Number(profileData?.analysis_count ?? 0);
+      const livePlan = String(profileData?.plan ?? "free");
 
-      // Sync to state
+      // Sync plan to state
       setUserPlan(livePlan as "free" | "starter" | "pro" | "agency" | "enterprise");
+
+      // Unlimited plans — never block
+      if (["agency", "enterprise"].includes(livePlan)) return false;
+
+      // Resolve limit — for free plan default to 1 even if the DB column is null
+      const liveLimit: number | null =
+        livePlan === "free"
+          ? 1  // always enforced, regardless of what the DB says
+          : profileData?.analysis_limit == null ? null : Number(profileData.analysis_limit);
+
+      if (liveLimit === null) return false; // truly unlimited paid plan
       setAnalysisLimit(liveLimit);
-      setAnalysisCount(liveCount);
 
-      // Unlimited plan — never block
-      if (liveLimit === null || ["agency", "enterprise"].includes(livePlan)) return false;
-
-      // Determine how many analyses to count for this plan
       const isFreePlan = livePlan === "free";
       let used: number;
 
       if (isFreePlan) {
-        // Free plan: use analysis_count from profile (total all-time)
-        used = liveCount;
+        // Count ALL analyses ever saved for this user (total, not daily)
+        const { data: allRows } = await supabase
+          .from("analyses")
+          .select("id")
+          .eq("user_id", userId);
+        used = (allRows ?? []).length;
       } else {
-        // Paid plans: count today's rows in analyses table
+        // Paid plans: count only today's analyses
         const todayStart = new Date();
         todayStart.setHours(0, 0, 0, 0);
-        const { count: dailyCount } = await supabase
+        const { data: dailyRows } = await supabase
           .from("analyses")
           .select("id")
           .eq("user_id", userId)
           .gte("created_at", todayStart.toISOString());
-        used = dailyCount ?? 0;
+        used = (dailyRows ?? []).length;
       }
 
+      setAnalysisCount(used);
       console.log(`[limit] live check: plan=${livePlan} used=${used} limit=${liveLimit} (${isFreePlan ? "total" : "daily"})`);
 
       if (used >= liveLimit) {
@@ -1833,10 +1851,10 @@ export default function DashboardPage() {
             {adsList.length === 0 && (
               <div style={{ textAlign: "center", padding: 48, background: "#0c0c14", borderRadius: 16, border: "1px solid #1a1a1a" }}>
                 <div style={{ fontSize: 36, marginBottom: 12 }}>🔍</div>
-                <div style={{ color: "white", fontWeight: 600, marginBottom: 16 }}>Search directly for their ads</div>
+                <div style={{ color: "white", fontWeight: 600, marginBottom: 8 }}>No ads found for this competitor</div>
+                <div style={{ color: "#555", fontSize: 13, marginBottom: 20 }}>Their ads may not have been captured. Go back and retry loading.</div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-                  <a href={`https://www.facebook.com/ads/library/?q=${encodeURIComponent(showAllAdsFor)}&search_type=keyword_unordered`} target="_blank" rel="noopener noreferrer" style={{ background: "#1877f2", borderRadius: 8, padding: "10px 18px", color: "white", fontSize: 13, fontWeight: 600, textDecoration: "none" }}>Meta Ads Library ↗</a>
-                  <a href={`https://library.tiktok.com/ads?region=US&keyword=${encodeURIComponent(showAllAdsFor)}`} target="_blank" rel="noopener noreferrer" style={{ background: "#111", border: "1px solid #333", borderRadius: 8, padding: "10px 18px", color: "#888", fontSize: 13, fontWeight: 600, textDecoration: "none" }}>TikTok Ads ↗</a>
+                  <button type="button" onClick={() => setShowAllAdsFor("")} style={{ background: "rgba(108,71,255,0.12)", border: "1px solid rgba(108,71,255,0.3)", borderRadius: 8, padding: "10px 18px", color: "#a78bfa", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>← Back to Competitor</button>
                 </div>
               </div>
             )}
@@ -1888,82 +1906,97 @@ export default function DashboardPage() {
             <div style={{ background: "#0c0c14", borderRadius: 14, border: "1px solid rgba(108,71,255,0.12)", padding: 20 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
                 <div style={{ color: "#555", fontSize: 11, fontWeight: 700, letterSpacing: 1 }}>THEIR ADS</div>
-                <button type="button" onClick={() => setShowAllAdsFor(nm)} style={{ background: "rgba(108,71,255,0.1)", border: "1px solid rgba(108,71,255,0.2)", borderRadius: 8, padding: "6px 14px", color: "#6c47ff", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>See All Ads →</button>
+                {adsForComp.length > 0 && (
+                  <button type="button" onClick={() => setShowAllAdsFor(nm)} style={{ background: "rgba(108,71,255,0.1)", border: "1px solid rgba(108,71,255,0.2)", borderRadius: 8, padding: "6px 14px", color: "#6c47ff", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>See All Ads →</button>
+                )}
               </div>
-              {loadingCompAds === nm ? (
-                <div style={{ textAlign: "center", padding: 30 }}>
-                  <div style={{ width: 30, height: 30, border: "2px solid rgba(108,71,255,0.2)", borderTop: "2px solid #6c47ff", borderRadius: "50%", animation: "compAdsSpin 1s linear infinite", margin: "0 auto 10px" }} />
-                  <div style={{ color: "#444", fontSize: 12 }}>Finding their ads...</div>
-                </div>
-              ) : adsForComp.length === 0 ? (
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <a href={`https://www.facebook.com/ads/library/?q=${encodeURIComponent(nm)}&search_type=keyword_unordered`} target="_blank" rel="noopener noreferrer" style={{ flex: 1, minWidth: 140, background: "#1877f222", border: "1px solid #1877f244", borderRadius: 8, padding: 12, color: "#1877f2", fontSize: 12, fontWeight: 600, textDecoration: "none", textAlign: "center", display: "block" }}>📖 Meta Ads Library</a>
-                  <a href={`https://library.tiktok.com/ads?region=US&keyword=${encodeURIComponent(nm)}`} target="_blank" rel="noopener noreferrer" style={{ flex: 1, minWidth: 140, background: "#ffffff11", border: "1px solid #ffffff22", borderRadius: 8, padding: 12, color: "#888", fontSize: 12, fontWeight: 600, textDecoration: "none", textAlign: "center", display: "block" }}>🎵 TikTok Ads Library</a>
-                </div>
-              ) : (() => {
-                const vidAds = adsForComp.slice(0, 6).filter((ad) => {
-                  const a = ad as Record<string, unknown>;
-                  return a.is_video === true || String(a.platform ?? "") === "TikTok" || String(a.platform ?? "") === "YouTube";
-                });
-                const imgAds = adsForComp.slice(0, 6).filter((ad) => !vidAds.includes(ad));
-                return (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                    {imgAds.length > 0 && (
-                      <div>
-                        <div style={{ color: "#555", fontSize: 10, fontWeight: 700, letterSpacing: 1, marginBottom: 10 }}>🖼 IMAGE ADS</div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                          {imgAds.map((raw, i) => {
-                            const ad = raw as Record<string, unknown>;
-                            const img = String(ad.image ?? "");
-                            const adUrl = String(ad.ad_url ?? "");
-                            const headline = String(ad.headline ?? "").substring(0, 60);
-                            return (
-                              <div key={i} style={{ borderRadius: 10, overflow: "hidden", border: "1px solid #1a1a1a", background: "#080810", display: "flex", flexDirection: "column" }}>
-                                <a href={adUrl || `https://www.facebook.com/ads/library/?q=${encodeURIComponent(nm)}`} target="_blank" rel="noopener noreferrer" style={{ display: "block", flexShrink: 0 }}>
-                                  {img ? (
-                                    <img src={img} alt="" style={{ width: "100%", height: 140, objectFit: "cover", display: "block" }} onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />
-                                  ) : (
-                                    <div style={{ height: 140, background: "#0a0a14", display: "flex", alignItems: "center", justifyContent: "center" }}><span style={{ color: "#333", fontSize: 11 }}>View Ad</span></div>
-                                  )}
-                                </a>
-                                <div style={{ padding: "8px 10px", flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
-                                  {headline && <div style={{ color: "#666", fontSize: 11, lineHeight: 1.4 }}>{headline}</div>}
-                                  <a href={adUrl || "#"} target="_blank" rel="noopener noreferrer" style={{ display: "block", background: "rgba(108,71,255,0.1)", border: "1px solid rgba(108,71,255,0.2)", borderRadius: 5, padding: 5, fontSize: 10, color: "#6c47ff", fontWeight: 600, textDecoration: "none", textAlign: "center", marginTop: "auto" }}>👁 See Post</a>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                    {vidAds.length > 0 && (
-                      <div>
-                        <div style={{ color: "#555", fontSize: 10, fontWeight: 700, letterSpacing: 1, marginBottom: 10 }}>🎥 VIDEO ADS</div>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                          {vidAds.map((raw, i) => {
-                            const ad = raw as Record<string, unknown>;
-                            const adUrl = String(ad.ad_url ?? "");
-                            const headline = String(ad.headline ?? "").substring(0, 100);
-                            return (
-                              <div key={i} role="button" tabIndex={0} onClick={() => { if (adUrl) window.open(adUrl, "_blank"); }} onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && adUrl) { e.preventDefault(); window.open(adUrl, "_blank"); } }} style={{ background: "#0c0c14", borderRadius: 12, border: "1px solid #1a1a1a", display: "flex", alignItems: "center", overflow: "hidden", cursor: "pointer", transition: "all 0.2s" }} onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#6c47ff"; }} onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#1a1a1a"; }}>
-                                <div style={{ position: "relative", width: 88, height: 88, flexShrink: 0, background: "#000", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                                  <ProdIqLogoImg preset="tab" />
-                                  <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 32, height: 32, borderRadius: "50%", background: "#6c47ff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: "white" }}>▶</div>
-                                </div>
-                                <div style={{ flex: 1, padding: "12px 16px", minWidth: 0 }}>
-                                  <div style={{ background: "#6c47ff22", border: "1px solid #6c47ff44", borderRadius: 4, padding: "2px 8px", fontSize: 10, color: "#a78bfa", fontWeight: 700, display: "inline-block", marginBottom: 6 }}>🎥 VIDEO AD</div>
-                                  {headline && <div style={{ color: "#ccc", fontSize: 13, lineHeight: 1.4, fontStyle: "italic", marginBottom: 6 }}>&ldquo;{headline}&rdquo;</div>}
-                                  <div style={{ color: "#6c47ff", fontSize: 11, fontWeight: 600 }}>Watch on TikTok ↗</div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
+              <LockedFeatureOverlay
+                locked={userPlan === "free"}
+                featureName="Competitor Ads"
+                onUpgrade={() => router.push("/pricing")}
+              >
+                {loadingCompAds === nm ? (
+                  <div style={{ textAlign: "center", padding: 30 }}>
+                    <div style={{ width: 30, height: 30, border: "2px solid rgba(108,71,255,0.2)", borderTop: "2px solid #6c47ff", borderRadius: "50%", animation: "compAdsSpin 1s linear infinite", margin: "0 auto 10px" }} />
+                    <div style={{ color: "#444", fontSize: 12 }}>Finding their ads...</div>
                   </div>
-                );
-              })()}
+                ) : adsForComp.length === 0 ? (
+                  <div style={{ textAlign: "center", padding: "28px 20px" }}>
+                    <div style={{ fontSize: 28, marginBottom: 10 }}>🔍</div>
+                    <div style={{ color: "#555", fontSize: 13, marginBottom: 14 }}>No ads found for this competitor yet.</div>
+                    <button
+                      type="button"
+                      onClick={() => void fetchCompetitorAds(sc)}
+                      style={{ background: "rgba(108,71,255,0.12)", border: "1px solid rgba(108,71,255,0.3)", borderRadius: 8, padding: "9px 20px", color: "#a78bfa", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+                    >
+                      🔄 Retry Loading Ads
+                    </button>
+                  </div>
+                ) : (() => {
+                  const vidAds = adsForComp.slice(0, 6).filter((ad) => {
+                    const a = ad as Record<string, unknown>;
+                    return a.is_video === true || String(a.video ?? "").trim() !== "" || String(a.platform ?? "") === "TikTok" || String(a.platform ?? "") === "YouTube";
+                  });
+                  const imgAds = adsForComp.slice(0, 6).filter((ad) => !vidAds.includes(ad));
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                      {imgAds.length > 0 && (
+                        <div>
+                          <div style={{ color: "#555", fontSize: 10, fontWeight: 700, letterSpacing: 1, marginBottom: 10 }}>🖼 IMAGE ADS</div>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                            {imgAds.map((raw, i) => {
+                              const ad = raw as Record<string, unknown>;
+                              const img = String(ad.image ?? "");
+                              const adUrl = String(ad.ad_url ?? "");
+                              const headline = String(ad.headline ?? "").substring(0, 60);
+                              return (
+                                <div key={i} style={{ borderRadius: 10, overflow: "hidden", border: "1px solid #1a1a1a", background: "#080810", display: "flex", flexDirection: "column" }}>
+                                  <a href={adUrl || "#"} target="_blank" rel="noopener noreferrer" style={{ display: "block", flexShrink: 0 }}>
+                                    {img ? (
+                                      <img src={img} alt="" style={{ width: "100%", height: 140, objectFit: "cover", display: "block" }} onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />
+                                    ) : (
+                                      <div style={{ height: 140, background: "#0a0a14", display: "flex", alignItems: "center", justifyContent: "center" }}><span style={{ color: "#333", fontSize: 11 }}>View Ad</span></div>
+                                    )}
+                                  </a>
+                                  <div style={{ padding: "8px 10px", flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+                                    {headline && <div style={{ color: "#666", fontSize: 11, lineHeight: 1.4 }}>{headline}</div>}
+                                    {adUrl && <a href={adUrl} target="_blank" rel="noopener noreferrer" style={{ display: "block", background: "rgba(108,71,255,0.1)", border: "1px solid rgba(108,71,255,0.2)", borderRadius: 5, padding: 5, fontSize: 10, color: "#6c47ff", fontWeight: 600, textDecoration: "none", textAlign: "center", marginTop: "auto" }}>👁 See Post</a>}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                      {vidAds.length > 0 && (
+                        <div>
+                          <div style={{ color: "#555", fontSize: 10, fontWeight: 700, letterSpacing: 1, marginBottom: 10 }}>🎥 VIDEO ADS</div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            {vidAds.map((raw, i) => {
+                              const ad = raw as Record<string, unknown>;
+                              const adUrl = String(ad.ad_url ?? "");
+                              const headline = String(ad.headline ?? "").substring(0, 100);
+                              return (
+                                <div key={i} role="button" tabIndex={0} onClick={() => { if (adUrl) window.open(adUrl, "_blank"); }} onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && adUrl) { e.preventDefault(); window.open(adUrl, "_blank"); } }} style={{ background: "#111", borderRadius: 12, border: "1px solid #1a1a1a", display: "flex", alignItems: "center", overflow: "hidden", cursor: "pointer", transition: "all 0.2s" }} onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#6c47ff"; }} onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#1a1a1a"; }}>
+                                  <div style={{ position: "relative", width: 88, height: 88, flexShrink: 0, background: "#000", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                                    <ProdIqLogoImg preset="tab" />
+                                    <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 32, height: 32, borderRadius: "50%", background: "#6c47ff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: "white" }}>▶</div>
+                                  </div>
+                                  <div style={{ flex: 1, padding: "12px 16px", minWidth: 0 }}>
+                                    <div style={{ background: "#6c47ff22", border: "1px solid #6c47ff44", borderRadius: 4, padding: "2px 8px", fontSize: 10, color: "#a78bfa", fontWeight: 700, display: "inline-block", marginBottom: 6 }}>🎥 VIDEO AD</div>
+                                    {headline && <div style={{ color: "#ccc", fontSize: 13, lineHeight: 1.4, fontStyle: "italic", marginBottom: 6 }}>&ldquo;{headline}&rdquo;</div>}
+                                    {adUrl && <div style={{ color: "#6c47ff", fontSize: 11, fontWeight: 600 }}>Watch Ad ↗</div>}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </LockedFeatureOverlay>
             </div>
           </div>
         );

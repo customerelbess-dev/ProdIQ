@@ -86,19 +86,26 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
       console.error(`[analyze] profiles read error for user=${userId}:`, profileErr.message);
     }
 
-    const plan           = String(profile?.plan ?? "free");
-    const analysisCount  = Number(profile?.analysis_count ?? 0);
-    // analysis_limit from DB: null means unlimited (agency), number means capped
-    const analysisLimit: number | null =
-      profile?.analysis_limit == null ? null : Number(profile.analysis_limit);
-
+    const plan  = String(profile?.plan ?? "free");
     const period = periodForPlan(plan);
+
+    // ── Resolve analysis limit ──────────────────────────────────────────────
+    // Critical: if analysis_limit is NULL in the DB for a free user, we MUST
+    // default to 1. Treating null as "unlimited" is the bug that allows free
+    // users to run infinite analyses.
+    let analysisLimit: number | null;
+    if (plan === "free") {
+      // Free plan always has a limit of 1, regardless of what the DB says
+      analysisLimit = profile?.analysis_limit == null ? 1 : Number(profile.analysis_limit);
+    } else {
+      // Paid plans: null means unlimited (agency/enterprise handled by periodForPlan)
+      analysisLimit = profile?.analysis_limit == null ? null : Number(profile.analysis_limit);
+    }
 
     console.log(`[analyze] ── plan check ──`);
     console.log(`[analyze]   user_id        = ${userId}`);
     console.log(`[analyze]   profile found  = ${profile !== null}`);
     console.log(`[analyze]   plan           = "${plan}"`);
-    console.log(`[analyze]   analysis_count = ${analysisCount}`);
     console.log(`[analyze]   analysis_limit = ${analysisLimit ?? "unlimited"}`);
     console.log(`[analyze]   period         = ${period}`);
 
@@ -112,14 +119,21 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
     let usedCount: number;
 
     if (period === "total") {
-      // For free plan use analysis_count from profiles (fastest — no extra query)
-      usedCount = analysisCount;
+      // Count actual rows in the analyses table — more reliable than analysis_count
+      // column because it doesn't depend on the RPC working or the column being
+      // correctly initialised. A newly signed-up user with 0 rows = 0 used.
+      const { data: freeRows } = await client
+        .from("analyses")
+        .select("id")
+        .eq("user_id", userId);
+      usedCount = (freeRows ?? []).length;
+      console.log(`[analyze]   free rows counted = ${usedCount}`);
     } else {
       // For paid daily plans count rows in analyses table created today
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
 
-      const { count, error: countErr } = await client
+      const { data: dailyRows, error: countErr } = await client
         .from("analyses")
         .select("id")
         .eq("user_id", userId)
@@ -129,7 +143,7 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
         console.error("[analyze] count error — failing open:", countErr.message);
         return { ...noop, plan };
       }
-      usedCount = count ?? 0;
+      usedCount = (dailyRows ?? []).length;
     }
 
     console.log(`[analyze]   used=${usedCount}/${analysisLimit} (${period})`);
@@ -498,8 +512,11 @@ main_angle MUST come from their actual product title or description in the searc
 For each competitor estimate monthly_revenue using evidence from the data when possible.
 
 ANGLES RULES — CRITICAL:
-You MUST generate minimum 6 angles: at least 2 SATURATED, 2 EMERGING, 2 UNTAPPED.
-NEVER return 0 saturated angles — there are ALWAYS saturated angles.
+You MUST generate EXACTLY 5 SATURATED angles, EXACTLY 5 EMERGING angles, and EXACTLY 5 UNTAPPED angles — 15 angles total minimum.
+NEVER return fewer than 5 per category. Every category MUST have at least 5 distinct angles.
+NEVER return 0 saturated angles — there are ALWAYS saturated angles for any product.
+
+Think hard. Dig deep into the data. Use every pain point, every review phrase, every Reddit thread to generate unique angles.
 
 SATURATED angles come from:
 - What the biggest brands in this space are saying (titles/descriptions in search data)
@@ -507,18 +524,23 @@ SATURATED angles come from:
 - Price-focused angles: "affordable", "cheap", "budget"
 - Feature-focused: listing specs instead of benefits
 - Top Amazon listing titles in the data ARE saturated angle fodder
+- Each saturated angle must be a DIFFERENT angle — not variations of the same idea
 
 EMERGING angles come from:
-- Reddit discussions showing new pain points
-- Recent trends in the data
+- Reddit discussions showing new pain points gaining traction
+- Recent trends in the data (growing but not mainstream yet)
 - Angles that 1-2 competitors use but not everyone yet
+- New demographics starting to use this product
+- Each emerging angle must be a DIFFERENT pain point or audience segment
 
 UNTAPPED angles come from:
 - Deep emotional pain in reviews that nobody addresses in marketing
-- Specific life situations in Reddit ("as a nurse who stands 12 hours")
-- Transformation stories in reviews
+- Specific life situations in Reddit ("as a nurse who stands 12 hours", "after my divorce")
+- Transformation stories in reviews (before/after emotional state)
 - Fear-based angles nobody is running
 - The angle that makes someone say "this was made for ME"
+- Hyper-specific customer identities not targeted by any competitor
+- Each untapped angle must target a DIFFERENT emotional trigger or life situation
 
 success_rate:
 - SATURATED: 8-35
@@ -533,7 +555,7 @@ Return ONLY valid compact JSON. No markdown.`;
 
   const response = await anthropic.messages.create({
     model: ANALYZE_MODEL,
-    max_tokens: 6000,
+    max_tokens: 8000,
     system: systemPrompt,
     messages: [
       {
@@ -574,6 +596,7 @@ Return ONLY this JSON (no markdown):
     }
   ],
   "angles": [
+    // IMPORTANT: Generate EXACTLY 5 SATURATED + 5 EMERGING + 5 UNTAPPED = 15 angles minimum
     {
       "name": string,
       "hook": string,

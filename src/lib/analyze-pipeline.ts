@@ -282,12 +282,18 @@ Read the real reviews and Reddit discussions provided. Extract:
 - What they say AFTER buying that made them happy
 - Frustrations with existing products (these become your winning angles)
 
-WINNING AD ANGLES:
-Based on real customer language found in the research, generate 4-5 angles that:
-- Address a specific pain point found in real reviews
-- Use the customer's own language
-- Haven't been used by the top competitors
-- Would work as a Meta or TikTok ad hook
+WINNING AD ANGLES — CRITICAL:
+You MUST generate EXACTLY 5 SATURATED angles, EXACTLY 5 EMERGING angles, and EXACTLY 5 UNTAPPED angles — 15 angles total minimum.
+NEVER return fewer than 5 per category.
+
+SATURATED angles: generic/mainstream claims the top brands all use ("best quality", "professional grade", price-focused, feature-focused).
+EMERGING angles: growing pain points from Reddit/reviews used by 1-2 competitors but not mainstream yet.
+UNTAPPED angles: deep emotional pain nobody is addressing in ads — hyper-specific life situations, transformation stories, fear-based hooks that make someone say "this was made for ME".
+
+success_rate ranges:
+- SATURATED: 8-35
+- EMERGING: 52-74
+- UNTAPPED: 72-94
 
 Return ONLY valid JSON with this structure:
 {
@@ -322,13 +328,17 @@ Return ONLY valid JSON with this structure:
     "customer_language": string[]
   },
   "angles": [
+    // 5 SATURATED + 5 EMERGING + 5 UNTAPPED = 15 minimum
     {
       "name": string,
+      "type": "UNTAPPED" | "EMERGING" | "SATURATED",
       "target_emotion": string,
       "hook": string,
       "body": string,
       "why_it_works": string,
-      "platform": string
+      "platform": string,
+      "success_rate": number,
+      "saturation": number
     }
   ],
   "creative": {
@@ -376,14 +386,24 @@ function normalizePipelineReport(raw: unknown): ProdIQReport {
     : [];
 
   const angles = Array.isArray(o.angles)
-    ? (o.angles as Record<string, unknown>[]).map((a) => ({
-        name: String(a.name ?? ""),
-        message: String(a.message ?? a.body ?? ""),
-        hook: String(a.hook ?? ""),
-        why_it_works: String(a.why_it_works ?? ""),
-        target_emotion: a.target_emotion != null ? String(a.target_emotion) : undefined,
-        platform: a.platform != null ? String(a.platform) : undefined,
-      }))
+    ? (o.angles as Record<string, unknown>[]).map((a) => {
+        const rawType = String(a.type ?? "").toUpperCase();
+        const validType = ["SATURATED", "EMERGING", "UNTAPPED"].includes(rawType) ? rawType : "UNTAPPED";
+        return {
+          name: String(a.name ?? ""),
+          message: String(a.message ?? a.body ?? ""),
+          hook: String(a.hook ?? ""),
+          why_it_works: String(a.why_it_works ?? ""),
+          target_emotion: a.target_emotion != null ? String(a.target_emotion) : undefined,
+          platform: a.platform != null ? String(a.platform) : undefined,
+          // Preserve categorisation fields so the dashboard mind-map works correctly
+          type: validType as "SATURATED" | "EMERGING" | "UNTAPPED",
+          success_rate: a.success_rate != null ? Math.max(50, Number(a.success_rate)) : undefined,
+          saturation: a.saturation != null ? Number(a.saturation) : undefined,
+          emotion: a.why_it_works != null ? String(a.why_it_works) : undefined,
+          script: a.body != null ? String(a.body) : a.message != null ? String(a.message) : undefined,
+        };
+      })
     : [];
 
   return {
