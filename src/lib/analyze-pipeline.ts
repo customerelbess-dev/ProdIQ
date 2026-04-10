@@ -295,7 +295,9 @@ success_rate ranges:
 - EMERGING: 52-74
 - UNTAPPED: 72-94
 
-Return ONLY valid JSON with this structure:
+ANGLES REQUIREMENT (non-negotiable): Your "angles" array MUST have exactly 5 SATURATED + 5 EMERGING + 5 UNTAPPED = 15 entries. Count before responding and add more if short.
+
+Return ONLY valid JSON (no comments, no markdown) with this structure:
 {
   "product_name": string,
   "score": number,
@@ -328,10 +330,9 @@ Return ONLY valid JSON with this structure:
     "customer_language": string[]
   },
   "angles": [
-    // 5 SATURATED + 5 EMERGING + 5 UNTAPPED = 15 minimum
     {
       "name": string,
-      "type": "UNTAPPED" | "EMERGING" | "SATURATED",
+      "type": "SATURATED" | "EMERGING" | "UNTAPPED",
       "target_emotion": string,
       "hook": string,
       "body": string,

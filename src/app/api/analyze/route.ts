@@ -564,7 +564,9 @@ Return ONLY valid compact JSON. No markdown.`;
 
 ${researchContext}
 
-Return ONLY this JSON (no markdown):
+ANGLES REQUIREMENT (non-negotiable): Your response MUST include exactly 5 SATURATED angles, 5 EMERGING angles, and 5 UNTAPPED angles — 15 angles total in the "angles" array. Each angle must be distinct. Before you finish, count your angles per type and add more if needed.
+
+Return ONLY this JSON (no markdown, no comments):
 {
   "product_name": string,
   "score": number,
@@ -596,11 +598,10 @@ Return ONLY this JSON (no markdown):
     }
   ],
   "angles": [
-    // IMPORTANT: Generate EXACTLY 5 SATURATED + 5 EMERGING + 5 UNTAPPED = 15 angles minimum
     {
       "name": string,
       "hook": string,
-      "type": "UNTAPPED" | "EMERGING" | "SATURATED",
+      "type": "SATURATED" | "EMERGING" | "UNTAPPED",
       "saturation": number,
       "success_rate": number,
       "emotion": string,
@@ -671,22 +672,6 @@ Return ONLY this JSON (no markdown):
   return report;
 }
 
-/**
- * For free plan users, trim the angles array to 1 per type so the server
- * never returns the full list to free users — even if they bypass the UI.
- */
-function applyFreePlanAnglesGate(report: Record<string, unknown>, plan: string): Record<string, unknown> {
-  if (plan !== "free") return report;
-  const angles = (report.angles as Array<Record<string, unknown>>) ?? [];
-  const seen = new Set<string>();
-  const trimmed = angles.filter((a) => {
-    const type = String(a.type ?? "EMERGING").toUpperCase();
-    if (seen.has(type)) return false;
-    seen.add(type);
-    return true;
-  });
-  return { ...report, angles: trimmed };
-}
 
 export async function POST(req: NextRequest) {
   console.log("Analyze API:", new Date().toISOString());
@@ -704,13 +689,15 @@ export async function POST(req: NextRequest) {
     const asin = typeof body.asin === "string" ? body.asin.trim() : "";
 
     if (product_name && search_query) {
-      const rawReport = await runDashboardAnalysis(product_name, search_query, asin || undefined);
+      const report = await runDashboardAnalysis(product_name, search_query, asin || undefined);
       if (usage.shouldRecord) await usage.recordUsage();
       // free_limit_reached: true only when the user has NOW exhausted their quota after
       // this analysis. Used by the frontend as a hint — NOT to show the wall immediately,
       // but so the next "New Product" click can skip a redundant server round-trip.
       const nowAtLimit = Boolean(usage.shouldRecord && usage.isLastAllowed);
-      const report = applyFreePlanAnglesGate(rawReport as Record<string, unknown>, usage.plan);
+      // NOTE: All angles are always returned regardless of plan.
+      // Plan-based display restrictions (show 1, blur rest) are enforced client-side only
+      // so that stored analyses already contain the full angle set for when users upgrade.
       return NextResponse.json({ success: true, report, free_limit_reached: nowAtLimit });
     }
 
@@ -749,10 +736,10 @@ export async function POST(req: NextRequest) {
           : Number(body.pricePoint),
     };
 
-    const rawReport = await runFullAnalysis(input);
+    const report = await runFullAnalysis(input);
     if (usage.shouldRecord) await usage.recordUsage();
     const nowAtLimit = Boolean(usage.shouldRecord && usage.isLastAllowed);
-    const report = applyFreePlanAnglesGate(rawReport as unknown as Record<string, unknown>, usage.plan);
+    // All angles returned regardless of plan — display restriction is client-side only.
     return NextResponse.json({ ...report, free_limit_reached: nowAtLimit });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Analysis failed";
