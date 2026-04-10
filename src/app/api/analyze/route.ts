@@ -16,6 +16,8 @@ interface UsageInfo {
    * immediately — without interrupting the current analysis flow.
    */
   isLastAllowed: boolean;
+  /** The resolved plan name — used to trim data in the response for free users */
+  plan: string;
   /**
    * Call AFTER a successful analysis to record usage.
    * Closes over the Supabase client — no args needed.
@@ -53,7 +55,7 @@ function quotaLabel(limit: number, period: "total" | "daily"): string {
  * Supabase connection never blocks a legitimate user.
  */
 async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
-  const noop: UsageInfo = { blockResponse: null, shouldRecord: false, isLastAllowed: false, recordUsage: async () => {} };
+  const noop: UsageInfo = { blockResponse: null, shouldRecord: false, isLastAllowed: false, plan: "free", recordUsage: async () => {} };
 
   const token = req.headers.get("Authorization")?.replace("Bearer ", "").trim();
   if (!token) return noop;
@@ -103,7 +105,7 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
     // Unlimited plan — allow immediately without counting
     if (period === "unlimited" || analysisLimit === null) {
       console.log(`[analyze]   → unlimited plan — allowing`);
-      return noop;
+      return { ...noop, plan };
     }
 
     // ── 2. Count analyses for the relevant period ───────────────────────────
@@ -125,7 +127,7 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
 
       if (countErr) {
         console.error("[analyze] count error — failing open:", countErr.message);
-        return noop;
+        return { ...noop, plan };
       }
       usedCount = count ?? 0;
     }
@@ -153,6 +155,7 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
         ),
         shouldRecord: false,
         isLastAllowed: false,
+        plan,
         recordUsage: async () => {},
       };
     }
@@ -174,7 +177,7 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
     // (usedCount + 1 will equal analysisLimit after recording).
     const isLastAllowed = usedCount + 1 >= analysisLimit;
 
-    return { blockResponse: null, shouldRecord: true, isLastAllowed, recordUsage };
+    return { blockResponse: null, shouldRecord: true, isLastAllowed, plan, recordUsage };
   } catch (err) {
     console.error("[analyze] usage check exception — failing open:", err);
     return noop;
@@ -645,6 +648,23 @@ Return ONLY this JSON (no markdown):
   return report;
 }
 
+/**
+ * For free plan users, trim the angles array to 1 per type so the server
+ * never returns the full list to free users — even if they bypass the UI.
+ */
+function applyFreePlanAnglesGate(report: Record<string, unknown>, plan: string): Record<string, unknown> {
+  if (plan !== "free") return report;
+  const angles = (report.angles as Array<Record<string, unknown>>) ?? [];
+  const seen = new Set<string>();
+  const trimmed = angles.filter((a) => {
+    const type = String(a.type ?? "EMERGING").toUpperCase();
+    if (seen.has(type)) return false;
+    seen.add(type);
+    return true;
+  });
+  return { ...report, angles: trimmed };
+}
+
 export async function POST(req: NextRequest) {
   console.log("Analyze API:", new Date().toISOString());
 
@@ -661,12 +681,13 @@ export async function POST(req: NextRequest) {
     const asin = typeof body.asin === "string" ? body.asin.trim() : "";
 
     if (product_name && search_query) {
-      const report = await runDashboardAnalysis(product_name, search_query, asin || undefined);
+      const rawReport = await runDashboardAnalysis(product_name, search_query, asin || undefined);
       if (usage.shouldRecord) await usage.recordUsage();
       // free_limit_reached: true only when the user has NOW exhausted their quota after
       // this analysis. Used by the frontend as a hint — NOT to show the wall immediately,
       // but so the next "New Product" click can skip a redundant server round-trip.
       const nowAtLimit = Boolean(usage.shouldRecord && usage.isLastAllowed);
+      const report = applyFreePlanAnglesGate(rawReport as Record<string, unknown>, usage.plan);
       return NextResponse.json({ success: true, report, free_limit_reached: nowAtLimit });
     }
 
@@ -705,9 +726,10 @@ export async function POST(req: NextRequest) {
           : Number(body.pricePoint),
     };
 
-    const report = await runFullAnalysis(input);
+    const rawReport = await runFullAnalysis(input);
     if (usage.shouldRecord) await usage.recordUsage();
     const nowAtLimit = Boolean(usage.shouldRecord && usage.isLastAllowed);
+    const report = applyFreePlanAnglesGate(rawReport as unknown as Record<string, unknown>, usage.plan);
     return NextResponse.json({ ...report, free_limit_reached: nowAtLimit });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Analysis failed";

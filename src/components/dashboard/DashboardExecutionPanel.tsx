@@ -2,6 +2,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 type AngleRow = Record<string, unknown>;
 
@@ -23,10 +24,14 @@ type Props = {
   /** Product hero image for landing preview modal */
   productImage?: string | null;
   analysisSource?: { full_report?: Record<string, unknown> | null; potential_success?: unknown } | null;
+  /** Current user plan — free users see 1 angle card; others see all */
+  userPlan?: string;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function DashboardExecutionPanel({ report, productImage: _pi, analysisSource: _as }: Props) {
+export function DashboardExecutionPanel({ report, productImage: _pi, analysisSource: _as, userPlan = "free" }: Props) {
+  const router = useRouter();
+  const isFree = userPlan === "free";
   const [selectedExecutionAngle, setSelectedExecutionAngle] = useState<ReturnType<typeof normalizeExecAngle> | null>(
     null,
   );
@@ -58,68 +63,117 @@ export function DashboardExecutionPanel({ report, productImage: _pi, analysisSou
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 14 }}>
-          {launchAngles.map((angle, i) => (
-            <div
-              key={i}
-              role="button"
-              tabIndex={0}
-              onClick={() => setSelectedExecutionAngle(angle)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setSelectedExecutionAngle(angle);
-                }
-              }}
-              style={{
-                background: "#0c0c14",
-                borderRadius: 16,
-                border: `1px solid ${angle.type === "UNTAPPED" ? "rgba(0,212,170,0.3)" : "rgba(167,139,250,0.35)"}`,
-                padding: 20,
-                cursor: "pointer",
-                transition: "all 0.2s",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.transform = "translateY(-3px)";
-                e.currentTarget.style.boxShadow = "0 12px 40px rgba(0,0,0,0.4)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.transform = "translateY(0)";
-                e.currentTarget.style.boxShadow = "none";
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+          {launchAngles.map((angle, i) => {
+            const locked = isFree && i > 0;
+            return (
+              <div key={i} style={{ position: "relative" }}>
                 <div
+                  role={locked ? undefined : "button"}
+                  tabIndex={locked ? -1 : 0}
+                  onClick={locked ? undefined : () => setSelectedExecutionAngle(angle)}
+                  onKeyDown={locked ? undefined : (e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setSelectedExecutionAngle(angle);
+                    }
+                  }}
                   style={{
-                    background: angle.type === "UNTAPPED" ? "#00d4aa22" : "#a78bfa22",
-                    color: angle.type === "UNTAPPED" ? "#00d4aa" : "#a78bfa",
-                    fontSize: 10,
-                    fontWeight: 800,
-                    padding: "4px 10px",
-                    borderRadius: 20,
+                    background: "#0c0c14",
+                    borderRadius: 16,
+                    border: `1px solid ${angle.type === "UNTAPPED" ? "rgba(0,212,170,0.3)" : "rgba(167,139,250,0.35)"}`,
+                    padding: 20,
+                    cursor: locked ? "default" : "pointer",
+                    transition: "all 0.2s",
+                  }}
+                  onMouseEnter={locked ? undefined : (e) => {
+                    e.currentTarget.style.transform = "translateY(-3px)";
+                    e.currentTarget.style.boxShadow = "0 12px 40px rgba(0,0,0,0.4)";
+                  }}
+                  onMouseLeave={locked ? undefined : (e) => {
+                    e.currentTarget.style.transform = "translateY(0)";
+                    e.currentTarget.style.boxShadow = "none";
                   }}
                 >
-                  {angle.type}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                    <div
+                      style={{
+                        background: angle.type === "UNTAPPED" ? "#00d4aa22" : "#a78bfa22",
+                        color: angle.type === "UNTAPPED" ? "#00d4aa" : "#a78bfa",
+                        fontSize: 10,
+                        fontWeight: 800,
+                        padding: "4px 10px",
+                        borderRadius: 20,
+                      }}
+                    >
+                      {angle.type}
+                    </div>
+                    <div style={{ color: "#00d4aa", fontWeight: 800 }}>{angle.success_rate}%</div>
+                  </div>
+                  <div style={{ color: "white", fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{angle.name}</div>
+                  <div style={{ color: "#888", fontSize: 13, fontStyle: "italic", marginBottom: 12 }}>&quot;{angle.hook}&quot;</div>
+                  <div
+                    style={{
+                      background: angle.type === "UNTAPPED" ? "#00d4aa" : "#a78bfa",
+                      borderRadius: 8,
+                      padding: 10,
+                      textAlign: "center",
+                      color: angle.type === "UNTAPPED" ? "#003322" : "#1a1028",
+                      fontWeight: 700,
+                      fontSize: 13,
+                    }}
+                  >
+                    Launch With This Angle →
+                  </div>
                 </div>
-                <div style={{ color: "#00d4aa", fontWeight: 800 }}>{angle.success_rate}%</div>
+
+                {/* Frosted glass lock overlay for non-first cards */}
+                {locked && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      background: "rgba(0,0,0,0.15)",
+                      backdropFilter: "blur(6px)",
+                      WebkitBackdropFilter: "blur(6px)",
+                      borderRadius: 16,
+                      zIndex: 5,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <span style={{ fontSize: 18 }}>🔒</span>
+                  </div>
+                )}
               </div>
-              <div style={{ color: "white", fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{angle.name}</div>
-              <div style={{ color: "#888", fontSize: 13, fontStyle: "italic", marginBottom: 12 }}>&quot;{angle.hook}&quot;</div>
-              <div
-                style={{
-                  background: angle.type === "UNTAPPED" ? "#00d4aa" : "#a78bfa",
-                  borderRadius: 8,
-                  padding: 10,
-                  textAlign: "center",
-                  color: angle.type === "UNTAPPED" ? "#003322" : "#1a1028",
-                  fontWeight: 700,
-                  fontSize: 13,
-                }}
-              >
-                Launch With This Angle →
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
+
+        {/* Single upgrade button at the bottom for free users */}
+        {isFree && launchAngles.length > 1 && (
+          <div style={{ marginTop: 20, textAlign: "center" }}>
+            <button
+              type="button"
+              onClick={() => router.push("/pricing")}
+              style={{
+                background: "linear-gradient(135deg, #6c47ff 0%, #a78bfa 100%)",
+                border: "none",
+                borderRadius: 12,
+                padding: "13px 32px",
+                color: "white",
+                fontSize: 14,
+                fontWeight: 700,
+                cursor: "pointer",
+                transition: "opacity 0.15s",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.82"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}
+            >
+              🚀 Upgrade to see full launch plan →
+            </button>
+          </div>
+        )}
       </div>
     );
   }

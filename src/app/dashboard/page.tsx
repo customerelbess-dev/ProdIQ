@@ -1718,6 +1718,7 @@ export default function DashboardPage() {
                 report={report}
                 productImage={selectedProduct?.product_image}
                 analysisSource={selectedProduct}
+                userPlan={userPlan}
               />
             </div>
           )}
@@ -2093,7 +2094,7 @@ export default function DashboardPage() {
               <strong style={{ color: "#00d4aa" }}>{untappedCount} are untapped</strong> — these are your best opportunities to run ads nobody else is running.
             </span>
           </div>
-          <AnglesTabMindMap analysisReport={report} setActiveTab={setActiveTab as (tab: string) => void} />
+          <AnglesTabMindMap analysisReport={report} setActiveTab={setActiveTab as (tab: string) => void} userPlan={userPlan} />
           {/* Ads section — Starter+ only */}
           <div style={{ marginTop: 40, paddingTop: 32, borderTop: "1px solid #1a1a1a" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 10 }}>

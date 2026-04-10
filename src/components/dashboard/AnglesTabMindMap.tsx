@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 type Angle = {
   type: "SATURATED" | "EMERGING" | "UNTAPPED";
@@ -16,10 +17,15 @@ type Angle = {
 type Props = {
   analysisReport: Record<string, unknown> | null;
   setActiveTab: (tab: string) => void;
+  /** Current user plan — free users see 1 angle per category; others see all */
+  userPlan?: string;
 };
 
-export function AnglesTabMindMap({ analysisReport, setActiveTab }: Props) {
+export function AnglesTabMindMap({ analysisReport, setActiveTab, userPlan = "free" }: Props) {
+  const router = useRouter();
   const [selectedAngle, setSelectedAngle] = useState<Angle | null>(null);
+
+  const isFree = userPlan === "free";
 
   const angles = (analysisReport?.angles ?? []) as Angle[];
   const saturated = angles.filter((a) => a.type === "SATURATED");
@@ -255,6 +261,113 @@ export function AnglesTabMindMap({ analysisReport, setActiveTab }: Props) {
     );
   }
 
+  /* ─── helpers ─────────────────────────────────────────────────────────── */
+
+  /** Render a single angle bubble node. `locked` = frosted-glass overlay */
+  function AngleNode({
+    angle,
+    locked,
+    borderColor,
+    bgColor,
+    labelColor,
+    labelText,
+    subText,
+    borderRadius = 50,
+  }: {
+    angle: Angle;
+    locked: boolean;
+    borderColor: string;
+    bgColor: string;
+    labelColor: string;
+    labelText: string;
+    subText: string;
+    borderRadius?: number;
+  }) {
+    return (
+      <div style={{ position: "relative" }}>
+        <div
+          role={locked ? undefined : "button"}
+          tabIndex={locked ? -1 : 0}
+          onClick={locked ? undefined : () => setSelectedAngle(angle)}
+          onKeyDown={locked ? undefined : (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setSelectedAngle(angle);
+            }
+          }}
+          style={{
+            background: bgColor,
+            border: `1px solid ${borderColor}`,
+            borderRadius,
+            padding: "10px 14px",
+            cursor: locked ? "default" : "pointer",
+            transition: "all 0.2s",
+            textAlign: "center",
+          }}
+          onMouseEnter={locked ? undefined : (e) => {
+            (e.currentTarget as HTMLDivElement).style.transform = "scale(1.03)";
+          }}
+          onMouseLeave={locked ? undefined : (e) => {
+            (e.currentTarget as HTMLDivElement).style.transform = "scale(1)";
+          }}
+        >
+          <div style={{ color: labelColor, fontSize: 11, fontWeight: 700, marginBottom: 2 }}>
+            {labelText}
+          </div>
+          <div style={{ color: "#888", fontSize: 10, lineHeight: 1.3 }}>{subText}</div>
+        </div>
+
+        {/* Frosted glass lock overlay */}
+        {locked && (
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: "rgba(0,0,0,0.15)",
+              backdropFilter: "blur(6px)",
+              WebkitBackdropFilter: "blur(6px)",
+              borderRadius,
+              zIndex: 5,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <span style={{ fontSize: 12 }}>🔒</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /** Small upgrade button rendered below a locked category column */
+  function UnlockButton({ label }: { label: string }) {
+    return (
+      <button
+        type="button"
+        onClick={() => router.push("/pricing")}
+        style={{
+          background: "rgba(108,71,255,0.12)",
+          border: "1px solid rgba(108,71,255,0.35)",
+          borderRadius: 20,
+          padding: "6px 12px",
+          color: "#a78bfa",
+          fontSize: 10,
+          fontWeight: 700,
+          cursor: "pointer",
+          marginTop: 4,
+          whiteSpace: "nowrap",
+          width: "100%",
+          transition: "background 0.15s",
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(108,71,255,0.22)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(108,71,255,0.12)"; }}
+      >
+        🔓 {label}
+      </button>
+    );
+  }
+
   return (
     <div>
       <div style={{ textAlign: "center", marginBottom: 8 }}>
@@ -267,7 +380,7 @@ export function AnglesTabMindMap({ analysisReport, setActiveTab }: Props) {
       <div
         style={{
           position: "relative",
-          minHeight: 600,
+          minHeight: 640,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -407,43 +520,20 @@ export function AnglesTabMindMap({ analysisReport, setActiveTab }: Props) {
             SATURATED
           </div>
           {saturated.map((angle, i) => (
-            <div
+            <AngleNode
               key={i}
-              role="button"
-              tabIndex={0}
-              onClick={() => setSelectedAngle(angle)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setSelectedAngle(angle);
-                }
-              }}
-              style={{
-                background: "rgba(255,68,68,0.06)",
-                border: "1px solid rgba(255,68,68,0.25)",
-                borderRadius: 50,
-                padding: "10px 14px",
-                cursor: "pointer",
-                transition: "all 0.2s",
-                textAlign: "center",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "rgba(255,68,68,0.15)";
-                e.currentTarget.style.transform = "scale(1.03)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "rgba(255,68,68,0.06)";
-                e.currentTarget.style.transform = "scale(1)";
-              }}
-            >
-              <div style={{ color: "#ff6b6b", fontSize: 11, fontWeight: 700, marginBottom: 2 }}>
-                {angle.saturation ?? 0}% sat.
-              </div>
-              <div style={{ color: "#888", fontSize: 10, lineHeight: 1.3 }}>
-                {angle.name?.substring(0, 30)}
-              </div>
-            </div>
+              angle={angle}
+              locked={isFree && i > 0}
+              borderColor="rgba(255,68,68,0.25)"
+              bgColor="rgba(255,68,68,0.06)"
+              labelColor="#ff6b6b"
+              labelText={`${angle.saturation ?? 0}% sat.`}
+              subText={angle.name?.substring(0, 30) ?? ""}
+            />
           ))}
+          {isFree && saturated.length > 1 && (
+            <UnlockButton label="Unlock all Saturated Angles" />
+          )}
         </div>
 
         {/* UNTAPPED — right side */}
@@ -471,96 +561,99 @@ export function AnglesTabMindMap({ analysisReport, setActiveTab }: Props) {
             UNTAPPED ✓
           </div>
           {untapped.map((angle, i) => (
-            <div
+            <AngleNode
               key={i}
-              role="button"
-              tabIndex={0}
-              onClick={() => setSelectedAngle(angle)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setSelectedAngle(angle);
-                }
-              }}
-              style={{
-                background: "rgba(0,212,170,0.06)",
-                border: "1px solid rgba(0,212,170,0.3)",
-                borderRadius: 50,
-                padding: "10px 14px",
-                cursor: "pointer",
-                transition: "all 0.2s",
-                textAlign: "center",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "rgba(0,212,170,0.15)";
-                e.currentTarget.style.transform = "scale(1.03)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "rgba(0,212,170,0.06)";
-                e.currentTarget.style.transform = "scale(1)";
-              }}
-            >
-              <div style={{ color: "#00d4aa", fontSize: 11, fontWeight: 700, marginBottom: 2 }}>
-                {Math.max(50, angle.success_rate ?? 50)}% success
-              </div>
-              <div style={{ color: "#aaa", fontSize: 10, lineHeight: 1.3 }}>
-                {angle.name?.substring(0, 30)}
-              </div>
-            </div>
+              angle={angle}
+              locked={isFree && i > 0}
+              borderColor="rgba(0,212,170,0.3)"
+              bgColor="rgba(0,212,170,0.06)"
+              labelColor="#00d4aa"
+              labelText={`${Math.max(50, angle.success_rate ?? 50)}% success`}
+              subText={angle.name?.substring(0, 30) ?? ""}
+            />
           ))}
+          {isFree && untapped.length > 1 && (
+            <UnlockButton label="Unlock all Untapped Angles" />
+          )}
         </div>
 
         {/* EMERGING — bottom */}
         <div
           style={{
             position: "absolute",
-            bottom: "5%",
+            bottom: "4%",
             left: "25%",
             right: "25%",
             display: "flex",
-            gap: 12,
-            justifyContent: "center",
+            flexDirection: "column",
+            gap: 8,
+            alignItems: "center",
           }}
         >
-          {emerging.map((angle, i) => (
-            <div
-              key={i}
-              role="button"
-              tabIndex={0}
-              onClick={() => setSelectedAngle(angle)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setSelectedAngle(angle);
-                }
-              }}
-              style={{
-                background: "rgba(108,71,255,0.06)",
-                border: "1px solid rgba(108,71,255,0.3)",
-                borderRadius: 50,
-                padding: "10px 14px",
-                cursor: "pointer",
-                transition: "all 0.2s",
-                textAlign: "center",
-                flex: 1,
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "rgba(108,71,255,0.15)";
-                e.currentTarget.style.transform = "scale(1.03)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "rgba(108,71,255,0.06)";
-                e.currentTarget.style.transform = "scale(1)";
-              }}
-            >
-              <div style={{ color: "#a78bfa", fontSize: 11, fontWeight: 700, marginBottom: 2 }}>
-                EMERGING
+          <div style={{ display: "flex", gap: 12, justifyContent: "center", width: "100%", flexWrap: "wrap" }}>
+            {emerging.map((angle, i) => (
+              <div key={i} style={{ flex: 1, minWidth: 80, position: "relative" }}>
+                <div
+                  role={isFree && i > 0 ? undefined : "button"}
+                  tabIndex={isFree && i > 0 ? -1 : 0}
+                  onClick={isFree && i > 0 ? undefined : () => setSelectedAngle(angle)}
+                  onKeyDown={isFree && i > 0 ? undefined : (e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setSelectedAngle(angle);
+                    }
+                  }}
+                  style={{
+                    background: "rgba(108,71,255,0.06)",
+                    border: "1px solid rgba(108,71,255,0.3)",
+                    borderRadius: 50,
+                    padding: "10px 14px",
+                    cursor: isFree && i > 0 ? "default" : "pointer",
+                    transition: "all 0.2s",
+                    textAlign: "center",
+                  }}
+                  onMouseEnter={isFree && i > 0 ? undefined : (e) => {
+                    (e.currentTarget as HTMLDivElement).style.background = "rgba(108,71,255,0.15)";
+                    (e.currentTarget as HTMLDivElement).style.transform = "scale(1.03)";
+                  }}
+                  onMouseLeave={isFree && i > 0 ? undefined : (e) => {
+                    (e.currentTarget as HTMLDivElement).style.background = "rgba(108,71,255,0.06)";
+                    (e.currentTarget as HTMLDivElement).style.transform = "scale(1)";
+                  }}
+                >
+                  <div style={{ color: "#a78bfa", fontSize: 11, fontWeight: 700, marginBottom: 2 }}>
+                    EMERGING
+                  </div>
+                  <div style={{ color: "#888", fontSize: 10, lineHeight: 1.3 }}>
+                    {angle.name?.substring(0, 25)}
+                  </div>
+                </div>
+                {/* Frosted glass lock for emerging nodes */}
+                {isFree && i > 0 && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      background: "rgba(0,0,0,0.15)",
+                      backdropFilter: "blur(6px)",
+                      WebkitBackdropFilter: "blur(6px)",
+                      borderRadius: 50,
+                      zIndex: 5,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <span style={{ fontSize: 12 }}>🔒</span>
+                  </div>
+                )}
               </div>
-              <div style={{ color: "#888", fontSize: 10, lineHeight: 1.3 }}>
-                {angle.name?.substring(0, 25)}
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
+          {/* One unlock button for the whole emerging category */}
+          {isFree && emerging.length > 1 && (
+            <UnlockButton label="Unlock all Emerging Angles" />
+          )}
         </div>
 
         {/* Legend */}
