@@ -10,6 +10,13 @@ interface UsageInfo {
   /** True when this user's usage should be incremented after success */
   shouldRecord: boolean;
   /**
+   * True when this analysis will consume the user's LAST allowed slot.
+   * Used to send a hint to the frontend (free_limit_reached) so the next
+   * "New Product" click can skip a server round-trip and show the wall
+   * immediately — without interrupting the current analysis flow.
+   */
+  isLastAllowed: boolean;
+  /**
    * Call AFTER a successful analysis to record usage.
    * Closes over the Supabase client — no args needed.
    */
@@ -46,7 +53,7 @@ function quotaLabel(limit: number, period: "total" | "daily"): string {
  * Supabase connection never blocks a legitimate user.
  */
 async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
-  const noop: UsageInfo = { blockResponse: null, shouldRecord: false, recordUsage: async () => {} };
+  const noop: UsageInfo = { blockResponse: null, shouldRecord: false, isLastAllowed: false, recordUsage: async () => {} };
 
   const token = req.headers.get("Authorization")?.replace("Bearer ", "").trim();
   if (!token) return noop;
@@ -162,7 +169,11 @@ async function resolveUsage(req: NextRequest): Promise<UsageInfo> {
       }
     };
 
-    return { blockResponse: null, shouldRecord: true, recordUsage };
+    // isLastAllowed: true when this is the final analysis slot being consumed
+    // (usedCount + 1 will equal analysisLimit after recording).
+    const isLastAllowed = usedCount + 1 >= analysisLimit;
+
+    return { blockResponse: null, shouldRecord: true, isLastAllowed, recordUsage };
   } catch (err) {
     console.error("[analyze] usage check exception — failing open:", err);
     return noop;
@@ -651,7 +662,11 @@ export async function POST(req: NextRequest) {
     if (product_name && search_query) {
       const report = await runDashboardAnalysis(product_name, search_query, asin || undefined);
       if (usage.shouldRecord) await usage.recordUsage();
-      return NextResponse.json({ success: true, report, free_limit_reached: usage.shouldRecord });
+      // free_limit_reached: true only when the user has NOW exhausted their quota after
+      // this analysis. Used by the frontend as a hint — NOT to show the wall immediately,
+      // but so the next "New Product" click can skip a redundant server round-trip.
+      const nowAtLimit = Boolean(usage.shouldRecord && usage.isLastAllowed);
+      return NextResponse.json({ success: true, report, free_limit_reached: nowAtLimit });
     }
 
     if (!body.inputType || !["image", "url", "text"].includes(String(body.inputType))) {
@@ -691,7 +706,8 @@ export async function POST(req: NextRequest) {
 
     const report = await runFullAnalysis(input);
     if (usage.shouldRecord) await usage.recordUsage();
-    return NextResponse.json({ ...report, free_limit_reached: usage.shouldRecord });
+    const nowAtLimit = Boolean(usage.shouldRecord && usage.isLastAllowed);
+    return NextResponse.json({ ...report, free_limit_reached: nowAtLimit });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Analysis failed";
     console.error("Analysis error:", error);

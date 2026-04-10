@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import { createClient } from "@supabase/supabase-js";
 
 const ADS_MODEL = "claude-haiku-4-5-20251001";
 // Use a smarter model for the visual gatekeeper pass
@@ -236,7 +237,56 @@ async function verifyAdsFull(
   return afterVisual.length > 0 ? afterVisual : afterText.slice(0, 8);
 }
 
+/**
+ * Resolve the calling user's plan from their Bearer token.
+ * Returns "free" if the token is absent, invalid, or Supabase is not configured.
+ * Fails open so a misconfigured env never blocks legitimate paid users.
+ */
+async function resolveCallerPlan(req: NextRequest): Promise<string> {
+  const token = req.headers.get("Authorization")?.replace("Bearer ", "").trim();
+  if (!token) return "free";
+
+  const supabaseUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL ?? "").trim();
+  const supabaseKey = (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "").trim();
+  if (!supabaseUrl || !supabaseKey || supabaseUrl.includes("placeholder")) return "free";
+
+  try {
+    const client = createClient(supabaseUrl, supabaseKey, {
+      global: { headers: { Authorization: `Bearer ${token}` } },
+      auth: { persistSession: false },
+    });
+    const { data: { user } } = await client.auth.getUser();
+    if (!user?.id) return "free";
+
+    const { data: profile } = await client
+      .from("profiles")
+      .select("plan")
+      .eq("id", user.id)
+      .maybeSingle();
+
+    return String(profile?.plan ?? "free");
+  } catch {
+    return "free"; // fail open — don't block paid users on infra errors
+  }
+}
+
 export async function POST(req: NextRequest) {
+  // ── Plan gate: Ads intelligence is Starter+ only ──────────────────────────
+  const callerPlan = await resolveCallerPlan(req);
+  const FREE_PLANS = ["free"];
+  if (FREE_PLANS.includes(callerPlan)) {
+    return NextResponse.json(
+      {
+        error: "PLAN_REQUIRED",
+        message: "Competitor Ads Intelligence requires a Starter plan or above.",
+        plan: callerPlan,
+        required_plan: "starter",
+      },
+      { status: 403 },
+    );
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   try {
     const body = (await req.json()) as {
       competitors?: CompetitorIn[];

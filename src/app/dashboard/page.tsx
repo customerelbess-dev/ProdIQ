@@ -21,6 +21,7 @@ import { CampaignsTab } from "@/components/dashboard/CampaignsTab";
 import { SuppliersTab } from "@/components/dashboard/SuppliersTab";
 import { AdvisorTab } from "@/components/dashboard/AdvisorTab";
 import { AnglesTabMindMap } from "@/components/dashboard/AnglesTabMindMap";
+import { LockedFeatureOverlay } from "@/components/dashboard/LockedFeatureOverlay";
 import {
   fallbackPotentialSuccess,
   getSuccessRate,
@@ -587,13 +588,22 @@ export default function DashboardPage() {
       }
     }
 
-    // STEP 2: Not saved yet — fetch from API
+    // STEP 2: Not saved yet — fetch from API (Starter+ only)
+    // Skip entirely for free plan users — the server will reject them anyway.
+    if (userPlan === "free") return;
+
     adsInFlightRef.current = true;
     setAdsLoading(true);
     try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token ?? "";
+
       const res = await fetch("/api/ads", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
         body: JSON.stringify({
           competitors: comps,
           product_name: analysisReport?.product_name || selectedProduct.product_name,
@@ -1285,10 +1295,10 @@ export default function DashboardPage() {
       setIdentifiedProduct(null);
       resetAnalysisStore();
 
-      // Show upgrade wall immediately after their one free analysis finishes
-      if (anJson.free_limit_reached === true) {
-        setTimeout(() => setShowUpgradeWall(true), 700);
-      }
+      // NOTE: We deliberately do NOT show the upgrade wall here.
+      // The free user just completed their analysis — let them see the results.
+      // The wall will appear the next time they try to START a new analysis via
+      // handleNewProduct or handleConfirmProduct → checkAndBlockIfOverLimit.
     } catch (e: unknown) {
       clearResearchTickers();
       ANALYSIS_STORE.inFlight = false;
@@ -1622,6 +1632,35 @@ export default function DashboardPage() {
   function renderTabBody() {
     // Tabs that don't require a selected product
     if (activeTab === "discover") {
+      const isPaidUser = ["starter", "pro", "agency", "enterprise"].includes(userPlan);
+      if (!isPaidUser) {
+        return (
+          <div style={{ background: "#0c0c14", borderRadius: 16, border: "1px solid rgba(108,71,255,0.12)", padding: 24 }}>
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ color: "white", fontWeight: 700, fontSize: 20, marginBottom: 6 }}>Private Supplier Network</div>
+              <div style={{ color: "#555", fontSize: 14 }}>Hand-picked suppliers who have worked with 7-figure brands.</div>
+            </div>
+            <LockedFeatureOverlay
+              locked={true}
+              featureName="Private Supplier Network"
+              onUpgrade={() => setShowUpgradeWall(true)}
+            >
+              {/* Placeholder preview so blur has something to show */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                {["Snacky", "Tina"].map((name) => (
+                  <div key={name} style={{ background: "#111", borderRadius: 16, border: "1px solid #1a1a1a", padding: 24, display: "flex", gap: 16, alignItems: "center" }}>
+                    <div style={{ width: 56, height: 56, borderRadius: 14, background: "#1a1a1a", flexShrink: 0 }} />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ color: "white", fontWeight: 800, fontSize: 20, marginBottom: 6 }}>{name}</div>
+                      <div style={{ color: "#333", fontSize: 13 }}>+86 ••• •••• ••••</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </LockedFeatureOverlay>
+          </div>
+        );
+      }
       return <SuppliersTab isPro={true} />;
     }
 
@@ -1939,45 +1978,53 @@ export default function DashboardPage() {
             setRevenueFilter={setRevenueFilter}
             elapsedSec={elapsed}
           />
-          {/* Competitors section */}
+          {/* Competitors section — Starter+ only */}
           <div style={{ marginTop: 40, paddingTop: 32, borderTop: "1px solid #1a1a1a" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
               <span style={{ color: "white", fontWeight: 700, fontSize: 18 }}>Competitors</span>
-              <span style={{ background: "#111", color: "#555", fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20 }}>{compsForMarket.length} found</span>
+              {userPlan !== "free" && (
+                <span style={{ background: "#111", color: "#555", fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20 }}>{compsForMarket.length} found</span>
+              )}
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {compsForMarket.map((comp, i) => {
-                const nm = String(comp.name ?? "").trim() || "—";
-                const site = String(comp.website ?? "").trim();
-                const dom = domainForFavicon(site);
-                const estRev = formatRevenue(comp.monthly_revenue as string | number | undefined);
-                return (
-                  <div
-                    key={i}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => handleCompetitorClick(comp)}
-                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleCompetitorClick(comp); } }}
-                    style={{ background: "#0c0c14", borderRadius: 14, border: "1px solid rgba(108,71,255,0.1)", padding: "16px 20px", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", transition: "all 0.2s" }}
-                    onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#6c47ff"; e.currentTarget.style.background = "#0e0e1a"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(108,71,255,0.1)"; e.currentTarget.style.background = "#0c0c14"; }}
-                  >
-                    <img src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(dom)}&sz=32`} alt="" style={{ width: 32, height: 32, borderRadius: 8, background: "#111", flexShrink: 0 }} onError={(e) => { e.currentTarget.style.display = "none"; }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ color: "white", fontWeight: 700, fontSize: 14, marginBottom: 2 }}>{nm}</div>
-                      <div style={{ color: "#555", fontSize: 12, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        &quot;{String(comp.main_angle ?? "").substring(0, 60)}&quot;
+            <LockedFeatureOverlay
+              locked={userPlan === "free"}
+              featureName="Competitor Intelligence"
+              onUpgrade={() => setShowUpgradeWall(true)}
+            >
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {compsForMarket.map((comp, i) => {
+                  const nm = String(comp.name ?? "").trim() || "—";
+                  const site = String(comp.website ?? "").trim();
+                  const dom = domainForFavicon(site);
+                  const estRev = formatRevenue(comp.monthly_revenue as string | number | undefined);
+                  return (
+                    <div
+                      key={i}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => handleCompetitorClick(comp)}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleCompetitorClick(comp); } }}
+                      style={{ background: "#0c0c14", borderRadius: 14, border: "1px solid rgba(108,71,255,0.1)", padding: "16px 20px", display: "flex", alignItems: "center", gap: 14, cursor: "pointer", transition: "all 0.2s" }}
+                      onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#6c47ff"; e.currentTarget.style.background = "#0e0e1a"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(108,71,255,0.1)"; e.currentTarget.style.background = "#0c0c14"; }}
+                    >
+                      <img src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(dom)}&sz=32`} alt="" style={{ width: 32, height: 32, borderRadius: 8, background: "#111", flexShrink: 0 }} onError={(e) => { e.currentTarget.style.display = "none"; }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ color: "white", fontWeight: 700, fontSize: 14, marginBottom: 2 }}>{nm}</div>
+                        <div style={{ color: "#555", fontSize: 12, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          &quot;{String(comp.main_angle ?? "").substring(0, 60)}&quot;
+                        </div>
                       </div>
+                      <div style={{ textAlign: "right", flexShrink: 0 }}>
+                        <div style={{ color: "#00d4aa", fontWeight: 700, fontSize: 14 }}>{estRev}</div>
+                        <div style={{ color: "#444", fontSize: 10 }}>est. revenue</div>
+                      </div>
+                      <div style={{ color: "#444", fontSize: 16 }}>→</div>
                     </div>
-                    <div style={{ textAlign: "right", flexShrink: 0 }}>
-                      <div style={{ color: "#00d4aa", fontWeight: 700, fontSize: 14 }}>{estRev}</div>
-                      <div style={{ color: "#444", fontSize: 10 }}>est. revenue</div>
-                    </div>
-                    <div style={{ color: "#444", fontSize: 16 }}>→</div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            </LockedFeatureOverlay>
           </div>
         </div>
       );
@@ -2025,22 +2072,30 @@ export default function DashboardPage() {
             </span>
           </div>
           <AnglesTabMindMap analysisReport={report} setActiveTab={setActiveTab as (tab: string) => void} />
-          {/* Ads section */}
+          {/* Ads section — Starter+ only */}
           <div style={{ marginTop: 40, paddingTop: 32, borderTop: "1px solid #1a1a1a" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 10 }}>
               <span style={{ color: "white", fontWeight: 700, fontSize: 18 }}>Competitor Ads</span>
-              {adsLoading ? (
-                <div style={{ color: "#555", fontSize: 12 }}>Loading ads...</div>
-              ) : (
-                <div style={{ color: "#555", fontSize: 12 }}>{realAds.length} ads found</div>
+              {userPlan !== "free" && (
+                adsLoading ? (
+                  <div style={{ color: "#555", fontSize: 12 }}>Loading ads...</div>
+                ) : (
+                  <div style={{ color: "#555", fontSize: 12 }}>{realAds.length} ads found</div>
+                )
               )}
             </div>
-            <DashboardAdsIntelligence
-              report={adsReport2}
-              realAds={realAds}
-              adsLoading={adsLoading}
-              adsMarketInsight={adsMarketInsight}
-            />
+            <LockedFeatureOverlay
+              locked={userPlan === "free"}
+              featureName="Competitor Ads Intelligence"
+              onUpgrade={() => setShowUpgradeWall(true)}
+            >
+              <DashboardAdsIntelligence
+                report={adsReport2}
+                realAds={realAds}
+                adsLoading={adsLoading}
+                adsMarketInsight={adsMarketInsight}
+              />
+            </LockedFeatureOverlay>
           </div>
         </div>
       );
