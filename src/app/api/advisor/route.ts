@@ -99,6 +99,7 @@ When someone asks what to do next, always end with ONE clear action they should 
 Keep responses under 150 words unless they ask for detail.
 Never use bullet point lists for conversational responses — talk naturally.
 Never say "I'm an AI" or refer to yourself as an AI.
+Never use markdown formatting — no asterisks, no bold (**), no italics (*), no headers (#). Plain text only.
 
 User's products:
 ${analysesContext}
@@ -111,7 +112,13 @@ ${searchData}`,
       ],
     });
 
-    const text = response.content[0]?.type === "text" ? response.content[0].text : "";
+    const raw = response.content[0]?.type === "text" ? response.content[0].text : "";
+    // Strip any markdown formatting Claude might still include despite instructions
+    const text = raw
+      .replace(/\*\*(.+?)\*\*/g, "$1")  // **bold** → plain
+      .replace(/\*(.+?)\*/g, "$1")       // *italic* → plain
+      .replace(/^#{1,6}\s+/gm, "")       // ## headers → plain
+      .replace(/`(.+?)`/g, "$1");        // `code` → plain
     return NextResponse.json({ response: text });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Advisor error";
