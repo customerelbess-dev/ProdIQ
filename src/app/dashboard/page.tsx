@@ -1722,13 +1722,19 @@ export default function DashboardPage() {
             </div>
           )}
           {launchSubTab === "campaigns" && (
-            <CampaignsTab
-              analyses={analyses}
-              analysisReport={analysisReport}
-              setActiveTab={setActiveTab as (tab: string) => void}
-              setAnalysisReport={setAnalysisReport}
-              preselectedProduct={selectedProduct}
-            />
+            <LockedFeatureOverlay
+              locked={userPlan === "free"}
+              featureName="Campaign Builder"
+              onUpgrade={() => router.push("/pricing")}
+            >
+              <CampaignsTab
+                analyses={analyses}
+                analysisReport={analysisReport}
+                setActiveTab={setActiveTab as (tab: string) => void}
+                setAnalysisReport={setAnalysisReport}
+                preselectedProduct={selectedProduct}
+              />
+            </LockedFeatureOverlay>
           )}
         </div>
       );

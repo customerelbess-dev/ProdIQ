@@ -29,20 +29,19 @@ export function LockedFeatureOverlay({ locked, featureName, onUpgrade, children 
 
   return (
     <div style={{ position: "relative", borderRadius: 14, overflow: "hidden" }}>
-      {/* Blurred preview */}
-      <div
-        style={{ filter: "blur(8px)", opacity: 0.25, pointerEvents: "none", userSelect: "none" }}
-        aria-hidden="true"
-      >
+      {/* Real content — visible through the frosted glass overlay */}
+      <div style={{ pointerEvents: "none", userSelect: "none" }} aria-hidden="true">
         {children}
       </div>
 
-      {/* Dark overlay */}
+      {/* Frosted glass overlay — content is tantalizingly visible but unreadable */}
       <div
         style={{
           position: "absolute",
           inset: 0,
-          background: "rgba(4,4,6,0.88)",
+          background: "rgba(0,0,0,0.15)",
+          backdropFilter: "blur(6px)",
+          WebkitBackdropFilter: "blur(6px)",
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
