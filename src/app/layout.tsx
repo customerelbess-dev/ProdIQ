@@ -12,11 +12,25 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "ProdIQ — AI Product Intelligence",
-  description: "Know exactly what to sell and how to sell it before you lose money.",
+  title: "ProdIQ",
+  // No description — prevents platforms from showing a description card
   icons: {
     icon: "/logo.png",
     apple: "/logo.png",
+  },
+  // Explicitly empty — overrides Next.js auto-population so no og:* tags are emitted
+  openGraph: {
+    title: "",
+    description: "",
+    images: [],
+    siteName: "",
+  },
+  // Explicitly empty — prevents any twitter/X card from rendering
+  twitter: {
+    card: "summary",
+    title: "",
+    description: "",
+    images: [],
   },
 };
 
