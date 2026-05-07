@@ -146,29 +146,44 @@ export default function SignupPage() {
       setError(signUpError.message);
       return;
     }
+
     const user = data.user;
     const session = data.session;
-    if (user && session) {
-      const { error: profileError } = await supabase.from("profiles").upsert(
-        {
-          id: user.id,
-          full_name: fullName.trim() || null,
-          email: email.trim() || null,
-        },
-        { onConflict: "id" },
-      );
-      if (profileError) {
-        setLoading(false);
-        setError(profileError.message);
-        return;
+
+    // Always create the profile row — runs whether or not the user has a session yet.
+    // The /api/auth/create-profile route uses the service role key on the server
+    // so it works even before email confirmation (RLS would block a client insert).
+    if (user) {
+      try {
+        const res = await fetch("/api/auth/create-profile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_id: user.id,
+            email: email.trim(),
+            full_name: fullName.trim(),
+          }),
+        });
+        if (!res.ok) {
+          // Non-fatal: the DB trigger may have already created the row.
+          // Log it but don't block the signup flow.
+          const errBody = (await res.json().catch(() => ({}))) as { error?: string };
+          console.warn("[signup] create-profile fallback failed:", errBody.error);
+        }
+      } catch (err) {
+        console.warn("[signup] create-profile fetch failed:", err);
       }
     }
+
     setLoading(false);
+
     if (session) {
+      // Email confirmation is OFF — user has a session, send straight to dashboard
       router.push("/dashboard");
     } else {
+      // Email confirmation is ON — show success message
       setError(
-        "Account created. Check your email to confirm your address, then sign in.",
+        "✓ Account created! Check your email for a confirmation link, then sign in.",
       );
     }
   }

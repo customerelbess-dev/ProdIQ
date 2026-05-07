@@ -56,13 +56,45 @@ export default function LoginPage() {
       return;
     }
     setLoading(true);
-    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+    const { error: signInError } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
     setLoading(false);
+
     if (signInError) {
-      setError(signInError.message);
+      const msg = signInError.message.toLowerCase();
+      if (msg.includes("email not confirmed") || msg.includes("not confirmed")) {
+        setError(
+          "Your email isn't confirmed yet. Check your inbox (and spam folder) for the confirmation link we sent when you signed up.",
+        );
+      } else if (msg.includes("invalid login credentials") || msg.includes("invalid_credentials")) {
+        setError(
+          "Incorrect email or password. If you just signed up, make sure you confirmed your email first.",
+        );
+      } else {
+        setError(signInError.message);
+      }
       return;
     }
     router.push("/dashboard");
+  }
+
+  async function resendConfirmation() {
+    if (!email.trim()) {
+      setError("Enter your email above first, then click resend.");
+      return;
+    }
+    setError(null);
+    const { error: resendErr } = await supabase.auth.resend({
+      type: "signup",
+      email: email.trim(),
+    });
+    if (resendErr) {
+      setError(resendErr.message);
+    } else {
+      setError(`✓ Confirmation email re-sent to ${email.trim()}. Check your inbox.`);
+    }
   }
 
   return (
@@ -120,12 +152,26 @@ export default function LoginPage() {
 
           <form onSubmit={(e) => void onSubmit(e)}>
             {error ? (
-              <p
-                className="mb-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200"
+              <div
+                className={`mb-4 rounded-lg border px-3 py-2 text-sm ${
+                  error.startsWith("✓")
+                    ? "border-[#6c47ff]/40 bg-[#6c47ff]/10 text-[#d4ccff]"
+                    : "border-red-500/40 bg-red-500/10 text-red-200"
+                }`}
                 role="alert"
               >
-                {error}
-              </p>
+                <p>{error}</p>
+                {error.toLowerCase().includes("email isn't confirmed") ||
+                error.toLowerCase().includes("if you just signed up") ? (
+                  <button
+                    type="button"
+                    onClick={() => void resendConfirmation()}
+                    className="mt-2 cursor-pointer text-xs font-semibold text-[#6c47ff] underline hover:opacity-80"
+                  >
+                    Resend confirmation email
+                  </button>
+                ) : null}
+              </div>
             ) : null}
             <div style={{ marginBottom: 16 }}>
               <label
